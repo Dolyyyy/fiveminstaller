@@ -381,31 +381,26 @@ function selectVersion(){
             status "Sélectionnez une version du runtime"
             echo -e "${cyan}FiveM nécessite une version runtime pour fonctionner. Sélectionnez parmi les options ci-dessous:${reset}"
             
-            # Format des numéros de version
-            local latest_formatted="${bold}${green}$latest${reset}"
-            local recommended_formatted="${bold}${yellow}$latest_recommended${reset}"
+            # Format des numéros de version - éviter les échappements complexes
+            echo -e "  0) Dernière version -> ${bold}${green}$latest${reset} (la plus récente, peut être expérimentale)"
+            echo -e "  1) Dernière version recommandée -> ${bold}${yellow}$latest_recommended${reset} (stable, recommandée pour la production)"
+            echo -e "  2) Choisir une version personnalisée (avancé)"
+            echo -e "  3) Quitter sans installer"
+            echo ""
+            read -p "Votre choix [0-3]: " version_choice
             
-            export OPTIONS=(
-                "Dernière version -> $latest_formatted (la plus récente, peut être expérimentale)" 
-                "Dernière version recommandée -> $recommended_formatted (stable, recommandée pour la production)" 
-                "Choisir une version personnalisée (avancé)"
-                "Quitter sans installer"
-            )
-
-            bashSelect
-
-            case $? in
-                0 )
+            case $version_choice in
+                0|"")
                     artifacts_version="https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/${latest}/fx.tar.xz"
                     log "INFO" "Version sélectionnée: dernière version ($latest)"
                     echo -e "${green}Version sélectionnée:${reset} Dernière version (${bold}$latest${reset})"
                     ;;
-                1 )
+                1)
                     artifacts_version="https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/${latest_recommended}/fx.tar.xz"
                     log "INFO" "Version sélectionnée: dernière version recommandée ($latest_recommended)"
                     echo -e "${green}Version sélectionnée:${reset} Dernière version recommandée (${bold}$latest_recommended${reset})"
                     ;;
-                2 )
+                2)
                     clear
                     echo -e "${bold}Versions disponibles:${reset}"
                     log "INFO" "Affichage de toutes les versions disponibles pour la sélection de l'utilisateur"
@@ -444,9 +439,14 @@ function selectVersion(){
                         echo -e "${green}Sélection personnalisée:${reset} ${bold}$artifacts_version${reset}"
                     fi
                     ;;
-                3 )
+                3)
                     log "INFO" "Installation annulée par l'utilisateur"
                     cleanup_and_exit 0 "${yellow}Installation annulée par l'utilisateur.${reset}"
+                    ;;
+                *)
+                    echo -e "${red}Choix invalide. Utilisation de la dernière version recommandée.${reset}"
+                    artifacts_version="https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/${latest_recommended}/fx.tar.xz"
+                    log "INFO" "Choix invalide. Utilisation de la dernière version recommandée: $latest_recommended"
                     ;;
             esac
 
