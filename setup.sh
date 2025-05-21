@@ -435,9 +435,9 @@ function selectVersion(){
             echo -e "${cyan}FiveM requires a runtime version to operate. Select from the options below:${reset}"
             
             # Directly create formatted options with echo statements
-            echo -e "  ${bold}1)${reset} Latest version -> ${bold}${green}$latest${reset} (newest, may be experimental)"
-            echo -e "  ${bold}2)${reset} Latest recommended version -> ${bold}${yellow}$latest_recommended${reset} (stable, recommended for production)"
-            echo -e "  ${bold}3)${reset} Choose custom version (advanced)"
+            echo -e "  ${bold}1)${reset} Latest version -> ${bold}${green}$latest${reset} (plus récente)"
+            echo -e "  ${bold}2)${reset} Latest recommended version -> ${bold}${yellow}$latest_recommended${reset} (stable, recommandée)"
+            echo -e "  ${bold}3)${reset} Choose custom version (avancé)"
             echo -e "  ${bold}4)${reset} Exit without installing"
             
             echo
