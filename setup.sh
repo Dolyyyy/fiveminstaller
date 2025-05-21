@@ -343,9 +343,9 @@ choose_installation_path() {
 function selectVersion(){
     log "INFO" "Retrieving available versions"
     
-    local curl_output=$(mktemp)
+    local curl_output_file=$(mktemp)
     
-    if ! curl -s --max-time 30 https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/ > "$curl_output"; then
+    if ! curl -s --max-time 30 https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/ > "$curl_output_file"; then
         log "ERROR" "Failed to retrieve available versions from the FiveM server"
         echo -e "${red}${bold}ERROR:${reset} Could not connect to the FiveM artifact server. Please check your internet connection."
         # ... (garder la gestion d\'erreur existante pour l\'échec de curl) ...
@@ -353,17 +353,17 @@ function selectVersion(){
             echo -e "${yellow}Do you want to retry or specify a custom download URL?${reset}"
             select option in "Retry" "Specify custom URL" "Exit"; do
                 case $option in
-                    "Retry") rm -f "$curl_output"; selectVersion; return ;;
-                    "Specify custom URL") echo -e "${bold}Enter the direct download URL for the FiveM artifact:${reset}"; read -p "> " artifacts_version; rm -f "$curl_output"; return ;;
-                    "Exit") rm -f "$curl_output"; cleanup_and_exit 1 "Installation cancelled by user.";;
+                    "Retry") rm -f "$curl_output_file"; selectVersion; return ;; 
+                    "Specify custom URL") echo -e "${bold}Enter the direct download URL for the FiveM artifact:${reset}"; read -p "> " artifacts_version; rm -f "$curl_output_file"; return ;; 
+                    "Exit") rm -f "$curl_output_file"; cleanup_and_exit 1 "Installation cancelled by user.";;
                 esac
             done
         else
-            rm -f "$curl_output"; cleanup_and_exit 1 "Failed to retrieve FiveM versions in non-interactive mode."
+            rm -f "$curl_output_file"; cleanup_and_exit 1 "Failed to retrieve FiveM versions in non-interactive mode."
         fi
     fi
     
-    log "DEBUG" "Artifact server response received, parsing versions"
+    log "DEBUG" "Artifact server response received, parsing versions from: $curl_output_file"
     
     local display_latest=""
     local display_recommended=""
@@ -371,38 +371,92 @@ function selectVersion(){
     local url_segment_recommended=""
     local custom_url_base="https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/"
 
-    # Extrait les noms de répertoires comme '7000-xxxxxxxxxxxxx/'
-    # Ceux-ci sont supposés être triés du plus récent au plus ancien sur la page du serveur.
-    readarray -t DIR_LIST < <(grep -oE '[0-9]+-[a-zA-Z0-9._-]+/' "$curl_output" | head -3)
-
-    if [ ${#DIR_LIST[@]} -gt 0 ]; then
-        log "INFO" "Successfully parsed version directories from server response."
-        # DIR_LIST[0] est le plus récent, DIR_LIST[1] le deuxième plus récent.
-        
-        local dir_for_latest="${DIR_LIST[0]}"
-        local dir_for_recommended="${DIR_LIST[1]:-${DIR_LIST[0]}}" # Se rabat sur le plus récent si une seule version est trouvée
-
-        display_latest=$(echo "$dir_for_latest" | cut -d'-' -f1)
-        display_recommended=$(echo "$dir_for_recommended" | cut -d'-' -f1)
-
-        url_segment_latest="${dir_for_latest}fx.tar.xz"
-        url_segment_recommended="${dir_for_recommended}fx.tar.xz"
+    # 1. Essayer de trouver la version marquée "is-active" pour la plus récente
+    local active_version_line=$(grep 'is-active' "$curl_output_file" | grep -oE 'href="([0-9]+-[a-zA-Z0-9._-]+/)' | head -1)
+    if [[ -n "$active_version_line" ]]; then
+        local active_dir=$(echo "$active_version_line" | sed -E 's/href="([0-9]+-[a-zA-Z0-9._-]+)\/"/\1/')
+        display_latest=$(echo "$active_dir" | cut -d'-' -f1)
+        url_segment_latest="${active_dir}/fx.tar.xz"
+        log "INFO" "Found active latest version: $display_latest (from $active_dir)"
     else
-        log "WARN" "Could not parse version directories from server. Using hardcoded fallback versions."
-        
-        # Valeurs de repli
-        display_latest="6835" 
-        display_recommended="6683" 
-        url_segment_latest="6835.0/fx.tar.xz"    # Basé sur les anciennes valeurs de repli comme "6835.0/fx.tar.xz"
-        url_segment_recommended="6683.0/fx.tar.xz" 
+        log "WARN" "Could not find 'is-active' version. Will try fallback for latest."
     fi
 
-    rm -f "$curl_output" # Nettoyer le fichier temporaire
+    # 2. Essayer de trouver la version recommandée (7290 par défaut)
+    local recommended_build_target="7290"
+    local recommended_version_line=$(grep -oE 'href="('$recommended_build_target'[0-9.-]*-[a-zA-Z0-9._-]+/)' "$curl_output_file" | head -1)
+    if [[ -n "$recommended_version_line" ]]; then
+        local recommended_dir=$(echo "$recommended_version_line" | sed -E 's/href="([0-9]+-[a-zA-Z0-9._-]+)\/"/\1/')
+        display_recommended=$(echo "$recommended_dir" | cut -d'-' -f1)
+        url_segment_recommended="${recommended_dir}/fx.tar.xz"
+        log "INFO" "Found recommended version: $display_recommended (from $recommended_dir)"
+    else
+        log "WARN" "Could not find recommended build $recommended_build_target. Will try other fallbacks."
+    fi 
 
-    log "INFO" "Display Latest: $display_latest, URL segment for download: $url_segment_latest"
-    log "INFO" "Display Recommended: $display_recommended, URL segment for download: $url_segment_recommended"
+    # 3. Fallbacks si les méthodes ci-dessus échouent ou pour compléter
+    # Obtenir une liste générale des versions (NUMÉRO-HASH/) triée par le serveur (supposément plus récent en premier)
+    readarray -t ALL_DIRS_LIST < <(grep -oE '[0-9]+-[a-zA-Z0-9._-]+/' "$curl_output_file")
 
-    if [[ "${artifacts_version}" == "0" ]]; then
+    if [[ -z "$display_latest" && ${#ALL_DIRS_LIST[@]} -gt 0 ]]; then
+        local latest_fallback_dir=$(echo "${ALL_DIRS_LIST[0]}" | sed 's/\///') # enlève le / final
+        display_latest=$(echo "$latest_fallback_dir" | cut -d'-' -f1)
+        url_segment_latest="${latest_fallback_dir}/fx.tar.xz"
+        log "INFO" "Fallback for latest version: $display_latest (from $latest_fallback_dir)"
+    elif [[ -z "$display_latest" ]]; then # Fallback ultime pour display_latest
+        display_latest="15315" # Votre exemple de "is-active"
+        url_segment_latest="${display_latest}.0/fx.tar.xz" # Estimation
+        log "WARN" "Ultimate fallback for latest version: $display_latest"
+    fi
+
+    if [[ -z "$display_recommended" ]]; then
+        if [[ -n "$display_latest" && "$display_latest" == "$recommended_build_target" && ${#ALL_DIRS_LIST[@]} -gt 1 ]]; then
+             # Si la dernière active est la 7290, on prend la suivante comme recommandée
+            local rec_fallback_dir=$(echo "${ALL_DIRS_LIST[1]}" | sed 's/\///')
+            display_recommended=$(echo "$rec_fallback_dir" | cut -d'-' -f1)
+            url_segment_recommended="${rec_fallback_dir}/fx.tar.xz"
+            log "INFO" "Fallback for recommended (latest was target): $display_recommended"
+        elif [[ ${#ALL_DIRS_LIST[@]} -gt 0 && "$(echo "${ALL_DIRS_LIST[0]}" | cut -d'-' -f1)" != "$display_latest" ]]; then
+            # Si la première de la liste n'est PAS la dernière active (rare), on peut la prendre comme rec.
+            local rec_fallback_dir_alt=$(echo "${ALL_DIRS_LIST[0]}" | sed 's/\///')
+            display_recommended=$(echo "$rec_fallback_dir_alt" | cut -d'-' -f1)
+            url_segment_recommended="${rec_fallback_dir_alt}/fx.tar.xz"
+            log "INFO" "Fallback for recommended (first from list, not active): $display_recommended"
+        elif [[ ${#ALL_DIRS_LIST[@]} -gt 1 ]]; then 
+             # Sinon, prendre la deuxième de la liste générale comme recommandée
+            local rec_fallback_dir_2=$(echo "${ALL_DIRS_LIST[1]}" | sed 's/\///')
+            display_recommended=$(echo "$rec_fallback_dir_2" | cut -d'-' -f1)
+            url_segment_recommended="${rec_fallback_dir_2}/fx.tar.xz"
+            log "INFO" "Fallback for recommended (second from list): $display_recommended"
+        else # Fallback ultime pour display_recommended
+            display_recommended="$recommended_build_target" # 7290
+            url_segment_recommended="${display_recommended}.0/fx.tar.xz" # Estimation
+            log "WARN" "Ultimate fallback for recommended version: $display_recommended"
+        fi
+    fi
+    
+    # S'assurer que la version recommandée n'est pas la même que la dernière, si possible
+    if [[ "$display_latest" == "$display_recommended" && ${#ALL_DIRS_LIST[@]} -gt 1 ]]; then
+        # Si elles sont identiques et qu'on a au moins 2 versions, chercher une alternative pour la recommandée
+        for dir_entry in "${ALL_DIRS_LIST[@]}"; do
+            current_build_num=$(echo "$dir_entry" | cut -d'-' -f1)
+            if [[ "$current_build_num" != "$display_latest" ]]; then
+                local alt_rec_dir=$(echo "$dir_entry" | sed 's/\///')
+                display_recommended="$current_build_num"
+                url_segment_recommended="${alt_rec_dir}/fx.tar.xz"
+                log "INFO" "Adjusted recommended version to be different from latest: $display_recommended"
+                break
+            fi
+        done
+        # Si après la boucle elles sont toujours identiques (ex: une seule version sur le serveur), c'est ok.
+    fi
+
+    rm -f "$curl_output_file" # Nettoyer le fichier temporaire
+
+    log "INFO" "Final Display Latest: $display_latest, URL segment: $url_segment_latest"
+    log "INFO" "Final Display Recommended: $display_recommended, URL segment: $url_segment_recommended"
+
+    if [[ "${artifacts_version}" == "0" ]]; then # Si -v/--version n'a pas été utilisé
         if [[ "${non_interactive}" == "false" ]]; then
             status "Select a runtime version"
             echo -e "${cyan}FiveM requires a runtime version to operate. Select from the options below:${reset}"
@@ -427,51 +481,57 @@ function selectVersion(){
                     log "INFO" "Selected version: latest recommended version ($display_recommended)"
                     echo -e "${green}Selected version:${reset} Latest recommended version (${bold}$display_recommended${reset})"
                     ;;
-                3 ) # Option pour choisir une version personnalisée
+                3 ) 
                     clear
                     echo -e "${bold}Available versions (Examples - check FiveM site for full list):${reset}"
                     log "INFO" "Showing examples for custom version selection"
                     
                     echo -e "${cyan}Recent build numbers (example):${reset}"
-                    # Afficher quelques exemples basés sur les valeurs récupérées ou de repli
                     echo -e "  a) ${bold}$display_latest${reset}"
                     echo -e "  b) ${bold}$display_recommended${reset}"
-                    if [ -n "${DIR_LIST[2]}" ]; then
-                        echo -e "  c) ${bold}$(echo "${DIR_LIST[2]}" | cut -d'-' -f1)${reset}"
+                    # Essayer d'afficher une 3ème option si disponible et différente
+                    if [[ ${#ALL_DIRS_LIST[@]} -gt 2 ]]; then
+                        local third_build_num=$(echo "${ALL_DIRS_LIST[2]}" | cut -d'-' -f1)
+                        if [[ "$third_build_num" != "$display_latest" && "$third_build_num" != "$display_recommended" ]]; then
+                           echo -e "  c) ${bold}$third_build_num${reset}"
+                        fi 
                     fi
                     
                     echo
-                    echo -e "${yellow}Enter a build number (e.g., $display_latest), or paste a complete download URL for fx.tar.xz:${reset}"
+                    echo -e "${yellow}Enter a build number (e.g., $display_latest), its full directory name (e.g., ${display_latest}-xxxx), or paste a complete download URL for fx.tar.xz:${reset}"
                     read -p "> " custom_version_input
                     
                     if [[ "$custom_version_input" =~ ^https?:// ]]; then
                         artifacts_version="$custom_version_input"
-                    else
-                        # Essayer de trouver le HASH correspondant si seulement le numéro de build est donné
-                        # Ceci est complexe sans interroger à nouveau ou avoir la liste complète des HASH
-                        # Pour l'instant, on construit un chemin générique ; l'utilisateur doit s'assurer qu'il est correct
-                        # ou fournir l'URL complète.
-                        # Pour plus de robustesse, on pourrait re-parser $curl_output si on voulait trouver le hash exact.
-                        # Ou demander à l'utilisateur de fournir le chemin BUILD-HASH complet s'il ne donne pas l'URL.
-                        # Simplification: on assume que l'utilisateur donne un numéro de build qui pourrait fonctionner avec .0/fx.tar.xz
-                        # ou il doit donner un chemin plus complet ou une URL.
-                        local build_num_only=$(echo "$custom_version_input" | grep -oE '^[0-9]+')
-                        if [[ -n "$build_num_only" ]]; then
-                             artifacts_version="${custom_url_base}${build_num_only}.0/fx.tar.xz" # Hypothèse pour simplifier
-                             log "INFO" "Custom build number selected: $build_num_only (assuming format ${build_num_only}.0/fx.tar.xz)"
-                             echo -e "${green}Custom selection (guessed path):${reset} ${bold}${artifacts_version}${reset}"
-                             echo -e "${yellow}Note: If this direct path fails, please provide a full URL next time.${reset}"
-                        else
-                            # Si ce n'est pas une URL et pas un simple numéro, on essaie de l'utiliser comme segment direct BUILD-HASH/fx.tar.xz
-                            if [[ "$custom_version_input" == */fx.tar.xz ]]; then
-                               artifacts_version="${custom_url_base}${custom_version_input}"
-                            else
-                               artifacts_version="${custom_url_base}${custom_version_input}/fx.tar.xz" # ajout de /fx.tar.xz
+                    elif [[ "$custom_version_input" =~ ^[0-9]+-[a-zA-Z0-9._-]+$ ]]; then # Format NUMÉRO-HASH
+                        artifacts_version="${custom_url_base}${custom_version_input}/fx.tar.xz"
+                    elif [[ "$custom_version_input" =~ ^[0-9]+$ ]]; then # Juste le numéro de build
+                        # Essayer de trouver le hash correspondant dans la liste des répertoires
+                        local found_custom_dir=""
+                        for dir_entry in "${ALL_DIRS_LIST[@]}"; do
+                            if [[ "$(echo "$dir_entry" | cut -d'-' -f1)" == "$custom_version_input" ]]; then
+                                found_custom_dir=$(echo "$dir_entry" | sed 's/\///')
+                                break
                             fi
-                            log "INFO" "Custom version/URL segment selected: $custom_version_input"
-                            echo -e "${green}Custom selection:${reset} ${bold}$artifacts_version${reset}"
+                        done
+                        if [[ -n "$found_custom_dir" ]]; then
+                            artifacts_version="${custom_url_base}${found_custom_dir}/fx.tar.xz"
+                            log "INFO" "Custom build number $custom_version_input matched to directory $found_custom_dir"
+                        else
+                            # Si non trouvé, on utilise l'ancienne méthode d'estimation .0/fx.tar.xz
+                            artifacts_version="${custom_url_base}${custom_version_input}.0/fx.tar.xz"
+                            log "WARN" "Custom build $custom_version_input not found in parsed list, estimating path as ${custom_version_input}.0/fx.tar.xz"
+                            echo -e "${yellow}Note: Build $custom_version_input not found in list. Path is an estimation.${reset}"
                         fi
+                    else # Autre entrée, on l'utilise comme segment
+                         if [[ "$custom_version_input" == */fx.tar.xz ]]; then
+                               artifacts_version="${custom_url_base}${custom_version_input}"
+                         else
+                               artifacts_version="${custom_url_base}${custom_version_input}/fx.tar.xz"
+                         fi
                     fi
+                    log "INFO" "Custom version/URL selected: $artifacts_version"
+                    echo -e "${green}Custom selection:${reset} ${bold}$artifacts_version${reset}"
                     ;;
                 4 )
                     log "INFO" "Installation cancelled by user"
@@ -483,25 +543,19 @@ function selectVersion(){
                     artifacts_version="${custom_url_base}${url_segment_recommended}"
                     ;;
             esac
-            # return # Pas nécessaire ici car on sort ou on continue vers la validation d'URL
         else # Mode non interactif
             artifacts_version="${custom_url_base}${url_segment_latest}" # Par défaut, la plus récente en non-interactif
             log "INFO" "Non-interactive mode: using latest version ($display_latest)"
         fi
     fi # Fin de if [[ "${artifacts_version}" == "0" ]]
     
-    # Si artifacts_version a été défini par l'option -v/--version, cette logique sera sautée.
-    # Sinon, elle est définie ci-dessus.
-
-    # Valider l'URL finale (qu'elle vienne du choix utilisateur ou de -v)
     if ! validate_url "$artifacts_version"; then
         log "ERROR" "Invalid artifacts URL: $artifacts_version"
         if [[ "${non_interactive}" == "false" ]]; then
             echo -e "${red}${bold}ERROR:${reset} The specified URL is invalid or cannot be reached: $artifacts_version"
-            # Redemander ou sortir
-            artifacts_version="0" # Réinitialiser pour redemander
-            selectVersion # Boucler pour re-sélectionner
-            return # Important pour éviter la double exécution après la récursivité
+            artifacts_version="0" 
+            selectVersion 
+            return 
         else
             cleanup_and_exit 1 "Invalid artifacts URL in non-interactive mode: $artifacts_version"
         fi
