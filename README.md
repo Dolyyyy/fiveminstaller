@@ -1,7 +1,5 @@
 # FiveM Server Installer
 
-![FiveM Logo](https://avatars.githubusercontent.com/u/54678068?s=200&v=4)
-
 A comprehensive bash script for easily installing and managing FiveM servers on Linux. This enhanced installer provides an improved user experience with better logging, custom installation paths, and more configuration options.
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
