@@ -31,7 +31,7 @@ crontab_autostart=0
 pma_options=()
 script_version="1.2.0"
 
-# Variables globales pour la base de données existante
+# Global variables for existing database
 existing_db_host=""
 existing_db_name=""
 existing_db_user=""
@@ -827,13 +827,13 @@ function installPma(){
     if [[ "${non_interactive}" == "false" ]]; then
         if [[ "${install_phpmyadmin}" == "0" ]]; then
             status "Database Configuration"
-            echo -e "${cyan}FiveM peut utiliser une base de données pour stocker des données persistantes.${reset}"
-            echo -e "${blue}Vous pouvez installer MariaDB/MySQL et phpMyAdmin, ou utiliser une base de données existante.${reset}\n"
+            echo -e "${cyan}FiveM can use a database to store persistent data.${reset}"
+            echo -e "${blue}You can install MariaDB/MySQL and phpMyAdmin, or use an existing database.${reset}\n"
             
             export OPTIONS=(
-                "Installer MariaDB/MySQL et phpMyAdmin (recommandé pour les nouveaux utilisateurs)" 
-                "Utiliser une base de données existante" 
-                "Ne pas configurer de base de données"
+                "Install MariaDB/MySQL and phpMyAdmin (recommended for new users)" 
+                "Use existing database" 
+                "Do not configure database"
             )
 
             bashSelect
@@ -842,82 +842,82 @@ function installPma(){
                 0 )
                     install_phpmyadmin="true"
                     existing_db_configured=false
-                    log "INFO" "Installation de phpMyAdmin activée"
-                    echo -e "${green}Installation de MariaDB/MySQL et phpMyAdmin sélectionnée${reset}"
+                    log "INFO" "phpMyAdmin installation enabled"
+                    echo -e "${green}MariaDB/MySQL and phpMyAdmin installation selected${reset}"
                     ;;
                 1 )
                     install_phpmyadmin="false"
                     existing_db_configured=true
-                    log "INFO" "Configuration d'une base de données existante sélectionnée"
-                    echo -e "${green}Configuration d'une base de données existante sélectionnée${reset}"
+                    log "INFO" "Existing database configuration selected"
+                    echo -e "${green}Existing database configuration selected${reset}"
                     configureExistingDatabase
                     ;;
                 2 )
                     install_phpmyadmin="false"
                     existing_db_configured=false
-                    log "INFO" "Aucune installation/configuration de base de données"
-                    echo -e "${yellow}Aucune base de données ne sera configurée${reset}"
+                    log "INFO" "No database installation/configuration"
+                    echo -e "${yellow}No database will be configured${reset}"
                     ;;
             esac
         fi
     fi
     
     if [[ "${install_phpmyadmin}" == "true" ]]; then
-        log "INFO" "Installation de phpMyAdmin et MariaDB"
-        runCommand "bash <(curl -s https://raw.githubusercontent.com/JulianGransee/PHPMyAdminInstaller/main/install.sh) -s ${pma_options[*]}" "Installation de phpMyAdmin et MariaDB/MySQL" 1 1
+        log "INFO" "Installing phpMyAdmin and MariaDB"
+        runCommand "bash <(curl -s https://raw.githubusercontent.com/JulianGransee/PHPMyAdminInstaller/main/install.sh) -s ${pma_options[*]}" "Installing phpMyAdmin and MariaDB/MySQL" 1 1
     fi
 }
 
-# Fonction pour configurer une base de données existante
+# Function to configure an existing database
 function configureExistingDatabase() {
-    log "INFO" "Configuration d'une connexion à une base de données existante"
-    echo -e "${blue}Veuillez fournir les informations de connexion à votre base de données existante.${reset}"
-    echo -e "${yellow}Ces informations seront utilisées pour configurer votre serveur FiveM.${reset}\n"
+    log "INFO" "Configuring connection to existing database"
+    echo -e "${blue}Please provide connection information for your existing database.${reset}"
+    echo -e "${yellow}This information will be used to configure your FiveM server.${reset}\n"
     
-    read -p "Hôte de la base de données [localhost]: " input_db_host
+    read -p "Database host [localhost]: " input_db_host
     existing_db_host=${input_db_host:-"localhost"}
     
-    read -p "Nom de la base de données [fivem]: " input_db_name
+    read -p "Database name [fivem]: " input_db_name
     existing_db_name=${input_db_name:-"fivem"}
     
-    read -p "Utilisateur de la base de données [fivem]: " input_db_user
+    read -p "Database user [fivem]: " input_db_user
     existing_db_user=${input_db_user:-"fivem"}
     
-    read -p "Mot de passe de la base de données: " input_db_password
+    read -p "Database password: " input_db_password
     existing_db_password=${input_db_password}
     
-    # Vérification de la connexion si possible
+    # Connection verification if possible
     if command -v mysql &> /dev/null; then
-        log "INFO" "Tentative de vérification de la connexion à la base de données"
-        echo -e "${blue}Vérification de la connexion à la base de données...${reset}"
+        log "INFO" "Attempting to verify database connection"
+        echo -e "${blue}Verifying database connection...${reset}"
         
         if mysql -h "$existing_db_host" -u "$existing_db_user" -p"$existing_db_password" "$existing_db_name" -e "SELECT 1" &>/dev/null; then
-            log "SUCCESS" "Connexion à la base de données réussie"
-            echo -e "${green}✓ Connexion à la base de données réussie!${reset}"
+            log "SUCCESS" "Database connection successful"
+            echo -e "${green}✓ Database connection successful!${reset}"
         else
-            log "WARN" "Impossible de se connecter à la base de données avec les informations fournies"
-            echo -e "${yellow}⚠ Impossible de vérifier la connexion à la base de données.${reset}"
-            echo -e "${yellow}Les informations seront quand même enregistrées, mais vous devrez vérifier la configuration manuellement.${reset}"
+            log "WARN" "Unable to connect to database with provided information"
+            echo -e "${yellow}⚠ Unable to verify database connection.${reset}"
+            echo -e "${yellow}The information will still be saved, but you'll need to verify the configuration manually.${reset}"
             
-            # Donner à l'utilisateur la possibilité de réessayer
-            read -p "Voulez-vous réessayer? (O/n): " retry
+            # Give user the option to retry
+            read -p "Do you want to try again? (Y/n): " retry
             if [[ "$retry" != "n" && "$retry" != "N" ]]; then
                 configureExistingDatabase
                 return
             fi
         fi
     else
-        log "INFO" "Client MySQL non disponible, impossible de vérifier la connexion"
-        echo -e "${yellow}Client MySQL non disponible pour vérifier la connexion.${reset}"
-        echo -e "${yellow}Les informations seront enregistrées, mais vous devrez vérifier la connexion manuellement.${reset}"
+        log "INFO" "MySQL client not available, unable to verify connection"
+        echo -e "${yellow}MySQL client not available to verify connection.${reset}"
+        echo -e "${yellow}The information will be saved, but you'll need to verify the connection manually.${reset}"
     fi
     
-    log "INFO" "Informations de base de données existante configurées"
-    echo -e "${green}Informations de base de données enregistrées:${reset}"
-    echo -e "  ${blue}Hôte:${reset} $existing_db_host"
-    echo -e "  ${blue}Base de données:${reset} $existing_db_name"
-    echo -e "  ${blue}Utilisateur:${reset} $existing_db_user"
-    echo -e "  ${blue}Mot de passe:${reset} $(echo "$existing_db_password" | sed 's/./*/g')"
+    log "INFO" "Existing database information configured"
+    echo -e "${green}Database information saved:${reset}"
+    echo -e "  ${blue}Host:${reset} $existing_db_host"
+    echo -e "  ${blue}Database:${reset} $existing_db_name"
+    echo -e "  ${blue}User:${reset} $existing_db_user"
+    echo -e "  ${blue}Password:${reset} $(echo "$existing_db_password" | sed 's/./*/g')"
 }
 
 function install(){
