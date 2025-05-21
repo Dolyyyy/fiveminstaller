@@ -1,5 +1,5 @@
 To run the script :
-bash <(curl -s https://raw.githubusercontent.com/Dolyyyy/fiveminstaller/refs/heads/main/setup.sh)
+```bash <(curl -s https://raw.githubusercontent.com/Dolyyyy/fiveminstaller/refs/heads/main/setup.sh)```
 
 
 
