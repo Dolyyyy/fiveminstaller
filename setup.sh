@@ -343,85 +343,23 @@ choose_installation_path() {
 function selectVersion(){
     log "INFO" "Retrieving available versions"
     
-    # Create a temporary file for curl output
-    local curl_output=$(mktemp)
+    # Utiliser l'approche de l'ancien script pour récupérer les versions
+    VERSIONS=($(curl -s https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/ | grep -E -o '[0-9]+\.[0-9]+\.[0-9]+/fx\.tar\.xz' | head -3))
     
-    # Try to fetch the versions with a timeout
-    if ! curl -s --max-time 30 https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/ > "$curl_output"; then
-        log "ERROR" "Failed to retrieve available versions from the FiveM server"
-        echo -e "${red}${bold}ERROR:${reset} Could not connect to the FiveM artifact server. Please check your internet connection."
-        
-        if [[ "${non_interactive}" == "false" ]]; then
-            echo -e "${yellow}Do you want to retry or specify a custom download URL?${reset}"
-            select option in "Retry" "Specify custom URL" "Exit"; do
-                case $option in
-                    "Retry")
-                        rm -f "$curl_output"
-                        selectVersion
-                        return
-                        ;;
-                    "Specify custom URL")
-                        echo -e "${bold}Enter the direct download URL for the FiveM artifact:${reset}"
-                        read -p "> " artifacts_version
-                        rm -f "$curl_output"
-                        return
-                        ;;
-                    "Exit")
-                        rm -f "$curl_output"
-                        cleanup_and_exit 1 "Installation cancelled by user."
-                        ;;
-                esac
-            done
-        else
-            rm -f "$curl_output"
-            cleanup_and_exit 1 "Failed to retrieve FiveM versions in non-interactive mode."
-        fi
+    # Si aucune version n'est trouvée, essayer avec un motif moins restrictif
+    if [ ${#VERSIONS[@]} -eq 0 ]; then
+        log "DEBUG" "First method failed, trying alternative pattern"
+        VERSIONS=($(curl -s https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/ | grep -E -o '[0-9]+[^"/]*\/fx\.tar\.xz' | head -3))
     fi
     
-    # Save content to log for debugging
-    log "DEBUG" "Artifact server response received, parsing versions"
-    echo "===== ARTIFACT SERVER RESPONSE =====" >> "$LOG_FILE"
-    cat "$curl_output" >> "$LOG_FILE"
-    echo "====================================" >> "$LOG_FILE"
-    
-    # Try different parsing methods to find versions
-    # Method 1: Standard regex for version pattern
-    readarray -t VERSIONS < <(grep -oE '[0-9]+\.[0-9]+\.[0-9]+/fx\.tar\.xz' "$curl_output" | head -3 || echo "")
-    
-    # If that fails, try an alternative method
+    # Si toujours aucune version n'est trouvée, utiliser les versions de secours
     if [ ${#VERSIONS[@]} -eq 0 ]; then
-        log "DEBUG" "First parsing method failed, trying alternative method"
-        # Method 2: Look for href attributes containing version numbers
-        readarray -t VERSIONS < <(grep -oE 'href="[0-9]+\.[0-9]+\.[0-9]+/' "$curl_output" | sed 's/href="//g' | head -3 || echo "")
-        
-        # If that also fails, try one more method
-        if [ ${#VERSIONS[@]} -eq 0 ]; then
-            log "DEBUG" "Second parsing method failed, trying final method"
-            # Method 3: Just look for directory-like patterns with version numbers
-            readarray -t VERSIONS < <(grep -oE '[0-9]+\.[0-9]+\.[0-9]+/' "$curl_output" | head -3 || echo "")
-            
-            # Add fx.tar.xz to each version if we found versions but without the file
-            if [ ${#VERSIONS[@]} -gt 0 ]; then
-                for i in "${!VERSIONS[@]}"; do
-                    VERSIONS[$i]="${VERSIONS[$i]}fx.tar.xz"
-                done
-            fi
-        fi
-    fi
-    
-    # Check if we found any versions
-    if [ ${#VERSIONS[@]} -eq 0 ]; then
-        log "ERROR" "No FiveM versions found in the response from the server"
-        
-        # Use hardcoded fallback versions as last resort
-        log "INFO" "Using hardcoded fallback versions"
+        log "WARN" "Could not detect versions automatically, using fallback versions"
         VERSIONS=("6835.0/fx.tar.xz" "6683.0/fx.tar.xz" "6551.0/fx.tar.xz")
-        
-        echo -e "${yellow}${bold}WARNING:${reset} Could not parse versions from the server response."
-        echo -e "${yellow}Using fallback versions instead. These may not be the latest.${reset}"
+        echo -e "${yellow}${bold}AVERTISSEMENT:${reset} Impossible de détecter les versions automatiquement, utilisation des versions de secours."
+    else
+        log "INFO" "Successfully detected versions: ${VERSIONS[*]}"
     fi
-    
-    rm -f "$curl_output"  # Remove the temporary file
     
     latest_recommended=$(echo "${VERSIONS[0]}" | cut -d'/' -f1)
     latest=$(echo "${VERSIONS[2]}" | cut -d'/' -f1 2>/dev/null || echo "${VERSIONS[0]}" | cut -d'/' -f1)
@@ -434,7 +372,7 @@ function selectVersion(){
             status "Select a runtime version"
             echo -e "${cyan}FiveM requires a runtime version to operate. Select from the options below:${reset}"
             
-            # Directly create formatted options with echo statements
+            # Directement créer les options formatées avec affichage des versions
             echo -e "  ${bold}1)${reset} Latest version -> ${bold}${green}$latest${reset} (plus récente)"
             echo -e "  ${bold}2)${reset} Latest recommended version -> ${bold}${yellow}$latest_recommended${reset} (stable, recommandée)"
             echo -e "  ${bold}3)${reset} Choose custom version (avancé)"
