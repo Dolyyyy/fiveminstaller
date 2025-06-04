@@ -1199,15 +1199,21 @@ EOF
             # Extract the PIN from the log file
             # TxAdmin displays the PIN in a box format like:
             # ┃   Use the PIN below to register:   ┃
-            # ┃                1981                ┃
+            # ┃                3257                ┃
             
-            # First, try to extract the PIN from the box format
-            pin=$(grep -A 2 "Use the PIN below to register" /tmp/fivem.log | grep -E "┃\s*[0-9]+\s*┃" | grep -oE "[0-9]+")
+            # First, try to extract the PIN from the box format - look for exactly 4 digits
+            pin=$(grep -A 2 "Use the PIN below to register" /tmp/fivem.log | grep -E "┃\s*[0-9]{4}\s*┃" | grep -oE "[0-9]{4}")
             
-            # If that doesn't work, try other common formats
+            # If that doesn't work, try to find the PIN line directly
             if [ -z "$pin" ]; then
-                # Try to find PIN with different patterns
-                pin=$(grep -oE "PIN.*[^0-9]([0-9]{4})[^0-9]" /tmp/fivem.log | grep -oE "[0-9]{4}")
+                # Look for the specific pattern with the PIN in the box
+                pin=$(grep -E "┃\s*[0-9]{4}\s*┃" /tmp/fivem.log | grep -oE "[0-9]{4}" | head -1)
+            fi
+            
+            # If still no PIN found, try other common formats
+            if [ -z "$pin" ]; then
+                # Try to find PIN with different patterns - look for exactly 4 digits after PIN text
+                pin=$(grep -i "pin" /tmp/fivem.log | grep -oE "[0-9]{4}" | head -1)
             fi
             
             # If still no PIN found, try the old method as fallback
@@ -1216,21 +1222,23 @@ EOF
                 pin_line=$(grep -n "PIN" /tmp/fivem.log.tmp | head -1 | cut -d':' -f1)
                 
                 if [ -n "$pin_line" ]; then
-                    pin=$(sed -n "${pin_line}p" /tmp/fivem.log.tmp | sed -e 's/\^[[^m]*m//g' -e 's/[^0-9]//g')
+                    # Extract only 4-digit numbers from the PIN line
+                    pin=$(sed -n "${pin_line}p" /tmp/fivem.log.tmp | grep -oE "[0-9]{4}" | head -1)
                 fi
                 rm -f /tmp/fivem.log.tmp
             fi
             
-            # Final fallback - extract any 4-digit number near PIN text
+            # Final fallback - look for any 4-digit number in the entire log
             if [ -z "$pin" ]; then
-                pin=$(grep -i pin /tmp/fivem.log | grep -oE "[0-9]{4}" | head -1)
+                pin=$(grep -oE "[0-9]{4}" /tmp/fivem.log | tail -1)
             fi
             
-            if [ -n "$pin" ] && [ "$pin" != "" ]; then
+            # Validate that we have exactly a 4-digit PIN
+            if [[ "$pin" =~ ^[0-9]{4}$ ]]; then
                 log "INFO" "PIN extracted: $pin"
             else
                 pin="unknown"
-                log "WARN" "Could not extract PIN from logs"
+                log "WARN" "Could not extract valid 4-digit PIN from logs. Found: '$pin'"
             fi
             
             rm -f /tmp/fivem.log.tmp
