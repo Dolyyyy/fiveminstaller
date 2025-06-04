@@ -289,16 +289,39 @@ validate_url() {
 
 # Determine the default installation path
 get_default_dir() {
-    # If the user is root, use /home/FiveM
-    # Otherwise, use the user's home directory
-    local current_user=$(who am i | awk '{print $1}')
+    # Try multiple methods to detect the current user
+    local current_user=""
     
-    if [ "$current_user" == "root" ]; then
-        log "DEBUG" "Running as root, setting default directory to /home/FiveM" >> "$LOG_FILE"
+    # Method 1: Try $SUDO_USER (if script was run with sudo)
+    if [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ]; then
+        current_user="$SUDO_USER"
+        log "DEBUG" "Detected user via SUDO_USER: $current_user"
+    # Method 2: Try who am i
+    elif current_user=$(who am i 2>/dev/null | awk '{print $1}') && [ -n "$current_user" ]; then
+        log "DEBUG" "Detected user via 'who am i': $current_user"
+    # Method 3: Try whoami
+    elif current_user=$(whoami 2>/dev/null) && [ -n "$current_user" ]; then
+        log "DEBUG" "Detected user via 'whoami': $current_user"
+    # Method 4: Try $USER environment variable
+    elif [ -n "$USER" ]; then
+        current_user="$USER"
+        log "DEBUG" "Detected user via USER environment variable: $current_user"
+    # Method 5: Try logname
+    elif current_user=$(logname 2>/dev/null) && [ -n "$current_user" ]; then
+        log "DEBUG" "Detected user via 'logname': $current_user"
+    # Fallback: assume root
+    else
+        current_user="root"
+        log "DEBUG" "Could not detect user, defaulting to root"
+    fi
+    
+    # If user is root or cannot be determined, use /home/FiveM
+    if [ "$current_user" == "root" ] || [ -z "$current_user" ]; then
+        log "DEBUG" "Using root default directory: /home/FiveM"
         echo "/home/FiveM"
     else
         local home_dir="/home/$current_user/FiveM"
-        log "DEBUG" "Running as $current_user, setting default directory to $home_dir" >> "$LOG_FILE"
+        log "DEBUG" "Setting user directory for $current_user: $home_dir"
         echo "$home_dir"
     fi
 }
