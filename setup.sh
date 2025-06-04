@@ -1187,31 +1187,16 @@ EOF
 
         # Clean up existing log file
         if [[ -e '/tmp/fivem.log' ]]; then
-        rm /tmp/fivem.log
+            rm /tmp/fivem.log
         fi
         
-        # Start TxAdmin in a screen session with enhanced logging
-        log "INFO" "Starting TxAdmin with enhanced logging"
-        screen -L -Logfile /tmp/fivem.log -dmS fivem $dir/server/run.sh
+        # Prepare a file for screen output
+        touch /tmp/fivem_screen.txt
+        chmod 666 /tmp/fivem_screen.txt
         
-        # Also create a separate process to monitor the screen output
-        (
-            while true; do
-                if screen -list | grep -q "fivem"; then
-                    # Capture screen output directly
-                    screen -S fivem -X hardcopy /tmp/fivem_screen.txt
-                    # If screen output contains PIN, copy it to our main log
-                    if [ -f "/tmp/fivem_screen.txt" ] && grep -q "Use the PIN below to register" /tmp/fivem_screen.txt 2>/dev/null; then
-                        cat /tmp/fivem_screen.txt >> /tmp/fivem.log
-                        break
-                    fi
-                    sleep 2
-                else
-                    break
-                fi
-            done
-        ) &
-        monitor_pid=$!
+        # Start TxAdmin in a screen session
+        log "INFO" "Starting TxAdmin"
+        screen -dmS fivem $dir/server/run.sh
 
         # Wait for TxAdmin to start
         echo -e "${blue}Waiting for TxAdmin to start...${reset}"
@@ -1219,7 +1204,9 @@ EOF
         local started=false
         
         for ((i=1; i<=max_attempts; i++)); do
-            if grep -q "able to access" /tmp/fivem.log 2>/dev/null; then
+            # Use direct screen capture to check if server is started
+            screen -S fivem -X hardcopy /tmp/fivem_screen.txt
+            if grep -q "All ready! Please access" /tmp/fivem_screen.txt 2>/dev/null; then
                 started=true
                 break
             fi
@@ -1232,98 +1219,61 @@ EOF
         if [ "$started" = true ]; then
             log "SUCCESS" "TxAdmin started successfully"
             
-            # Wait specifically for the PIN to be displayed in the box format
-            echo -e "${blue}Waiting for PIN to be generated...${reset}"
-            local pin_attempts=45
-            local pin_found=false
+            # Direct PIN capture method
+            log "INFO" "Capturing PIN directly from screen"
             
-            for ((j=1; j<=pin_attempts; j++)); do
-                # Check if the PIN box is displayed
-                if grep -q "Use the PIN below to register" /tmp/fivem.log 2>/dev/null; then
-                    # Wait more time to ensure the PIN line is written completely
-                    sleep 5
-                    pin_found=true
-                    log "DEBUG" "PIN message found, waiting for PIN to be fully written"
-                    break
-                fi
-                printf "."
-                sleep 1
-            done
+            # Wait 3 seconds to ensure PIN is fully displayed
+            sleep 3
             
-            echo
+            # Capture screen content again to get the PIN
+            screen -S fivem -X hardcopy /tmp/fivem_screen.txt
             
-            if [ "$pin_found" = true ]; then
-                log "INFO" "PIN box detected, extracting PIN"
-                
-                # DEBUG: Show what's actually in the log file around the PIN
-                log "DEBUG" "Content around PIN in fivem.log:"
-                grep -A 10 -B 5 "Use the PIN below to register" /tmp/fivem.log >> "$LOG_FILE" 2>&1
-                
-                # Extract the PIN from the log file
-                # TxAdmin displays the PIN in a box format like:
-                # ┃   Use the PIN below to register:   ┃
-                # ┃                9334                ┃
-                
-                # Method 1: Look for the line immediately after "Use the PIN below to register"
-                pin=$(grep -A 3 "Use the PIN below to register" /tmp/fivem.log | grep -E "┃\s*[0-9]{4}\s*┃" | grep -oE "[0-9]{4}" | tail -1)
-                log "DEBUG" "Method 1 result: '$pin'"
-                
-                # Method 2: Look for any line with the box pattern containing exactly 4 digits
-                if [ -z "$pin" ]; then
-                    pin=$(grep -E "┃\s*[0-9]{4}\s*┃" /tmp/fivem.log | grep -oE "[0-9]{4}" | tail -1)
-                    log "DEBUG" "Method 2 result: '$pin'"
+            # Debug: Log what we've captured
+            log "DEBUG" "Captured screen content:"
+            cat /tmp/fivem_screen.txt >> "$LOG_FILE"
+            
+            # Extract PIN using pattern that matches the exact format in the screen
+            pin=$(grep -A 1 "Use the PIN below to register" /tmp/fivem_screen.txt | tail -1 | grep -oE "[0-9]{4}")
+            
+            if [ -z "$pin" ]; then
+                # Try different pattern
+                pin=$(grep -E "┃\s*[0-9]{4}\s*┃" /tmp/fivem_screen.txt | grep -oE "[0-9]{4}")
+            fi
+            
+            # If still no PIN, try generic number extraction near the word PIN
+            if [ -z "$pin" ]; then
+                # Get 5 lines after PIN text
+                start_line=$(grep -n "Use the PIN below to register" /tmp/fivem_screen.txt | cut -d: -f1)
+                if [ -n "$start_line" ]; then
+                    pin=$(sed -n "$((start_line)),$((start_line+5))p" /tmp/fivem_screen.txt | grep -oE "[0-9]{4}" | head -1)
                 fi
-                
-                # Method 3: Look for 4 digits in the context of the PIN box (larger context)
-                if [ -z "$pin" ]; then
-                    pin=$(grep -A 10 "Use the PIN below to register" /tmp/fivem.log | grep -oE "[0-9]{4}" | tail -1)
-                    log "DEBUG" "Method 3 result: '$pin'"
+            fi
+            
+            # Final fallback
+            if [ -z "$pin" ]; then
+                # Look for lines containing "PIN" and find nearby 4-digit numbers
+                pin_line=$(grep -n -i "pin" /tmp/fivem_screen.txt | tail -1 | cut -d: -f1)
+                if [ -n "$pin_line" ]; then
+                    # Search 5 lines before and after PIN mention
+                    start_search=$((pin_line > 5 ? pin_line - 5 : 1))
+                    end_search=$((pin_line + 5))
+                    pin=$(sed -n "${start_search},${end_search}p" /tmp/fivem_screen.txt | grep -oE "[0-9]{4}" | head -1)
                 fi
-                
-                # Method 4: Look for any 4-digit number after the PIN message
-                if [ -z "$pin" ]; then
-                    pin_line_num=$(grep -n "Use the PIN below to register" /tmp/fivem.log | tail -1 | cut -d: -f1)
-                    if [ -n "$pin_line_num" ]; then
-                        # Get the next 5 lines after the PIN message
-                        pin=$(sed -n "$((pin_line_num+1)),$((pin_line_num+5))p" /tmp/fivem.log | grep -oE "[0-9]{4}" | head -1)
-                        log "DEBUG" "Method 4 (line $pin_line_num) result: '$pin'"
-                    fi
-                fi
-                
-                # Method 5: Search for specific Unicode characters followed by 4 digits
-                if [ -z "$pin" ]; then
-                    pin=$(grep -oP "┃\s*\K[0-9]{4}(?=\s*┃)" /tmp/fivem.log | tail -1)
-                    log "DEBUG" "Method 5 (Unicode pattern) result: '$pin'"
-                fi
-                
-                # Method 6: Final fallback - last 4-digit number in the file
-                if [ -z "$pin" ]; then
-                    pin=$(grep -oE "[0-9]{4}" /tmp/fivem.log | tail -1)
-                    log "DEBUG" "Method 6 (fallback) result: '$pin'"
-                fi
-                
-                # Validate that we have exactly a 4-digit PIN
-                if [[ "$pin" =~ ^[0-9]{4}$ ]]; then
-                    log "INFO" "PIN extracted successfully: $pin"
-                    
-                    # Additional verification: show the exact line where PIN was found
-                    pin_context=$(grep -A 2 -B 2 "$pin" /tmp/fivem.log | tail -5)
-                    log "DEBUG" "PIN found in context: $pin_context"
-                else
-                    pin="unknown"
-                    log "WARN" "Could not extract valid 4-digit PIN from logs. Found: '$pin'"
-                    # Debug: show more of the log
-                    log "DEBUG" "Last 20 lines of fivem.log:"
-                    tail -20 /tmp/fivem.log >> "$LOG_FILE" 2>&1
-                    log "DEBUG" "All 4-digit numbers found in log:"
-                    grep -oE "[0-9]{4}" /tmp/fivem.log >> "$LOG_FILE" 2>&1
-                fi
+            fi
+            
+            # Absolute fallback - just find any 4-digit number in the whole screen
+            if [ -z "$pin" ]; then
+                pin=$(grep -oE "[0-9]{4}" /tmp/fivem_screen.txt | head -1)
+            fi
+            
+            # Validate PIN format
+            if [[ "$pin" =~ ^[0-9]{4}$ ]]; then
+                log "INFO" "PIN extracted successfully: $pin"
             else
+                # If all fails, just do a full dump for debugging
+                log "WARN" "Could not extract valid 4-digit PIN. Dumping screen content:"
+                cat /tmp/fivem_screen.txt >> "$LOG_FILE"
                 pin="unknown"
-                log "WARN" "PIN box was not detected in the expected time"
-                # Debug: show the entire log to see what we captured
-                log "DEBUG" "Complete fivem.log content:"
-                cat /tmp/fivem.log >> "$LOG_FILE" 2>&1
             fi
             
             # Get the server IP address and TxAdmin URL
@@ -1389,10 +1339,7 @@ EOF
             # Create installation info file
             create_installation_info
             
-            # Clean up monitoring process and temporary files
-            if [ -n "$monitor_pid" ]; then
-                kill $monitor_pid 2>/dev/null || true
-            fi
+            # Clean up temporary files
             rm -f /tmp/fivem_screen.txt
             
             echo -e "\n${bold}${green}Installation information has been saved to:${reset} $dir/installation_info.txt"
@@ -1400,15 +1347,12 @@ EOF
         else
             log "ERROR" "TxAdmin did not start in the expected time"
             
-            # Clean up monitoring process and temporary files
-            if [ -n "$monitor_pid" ]; then
-                kill $monitor_pid 2>/dev/null || true
-            fi
+            # Clean up temporary files
             rm -f /tmp/fivem_screen.txt
             
             echo -e "${red}${bold}WARNING:${reset} TxAdmin did not start in the expected time."
             echo -e "${yellow}You may need to manually start it using:${reset} ${bold}sh $dir/start.sh${reset}"
-            echo -e "${yellow}Check the logs for more information:${reset} ${bold}less /tmp/fivem.log${reset}"
+            echo -e "${yellow}Check the logs for more information:${reset} ${bold}less /tmp/fivem_screen.txt${reset}"
         fi
     else
         log "ERROR" "TxAdmin port 40120 is already in use"
