@@ -864,7 +864,13 @@ function installPma(){
     
     if [[ "${install_phpmyadmin}" == "true" ]]; then
         log "INFO" "Installing phpMyAdmin and MariaDB"
-        runCommand "bash <(curl -s https://raw.githubusercontent.com/Dolyyyy/fiveminstaller/refs/heads/main/phpmyadmin.sh) -s ${pma_options[*]}" "Installing phpMyAdmin and MariaDB/MySQL" 1 1
+        echo -e "\n${bold}${yellow}Installing MariaDB 11.4 and phpMyAdmin...${reset}"
+        echo -e "${blue}This process may take several minutes. Please wait...${reset}\n"
+        
+        # Show progress during installation by not hiding output
+        runCommand "bash <(curl -s https://raw.githubusercontent.com/Dolyyyy/fiveminstaller/refs/heads/main/phpmyadmin.sh) -s ${pma_options[*]}" "Installing phpMyAdmin and MariaDB/MySQL" 0 1
+        
+        echo -e "\n${green}✓ MariaDB and phpMyAdmin installation completed!${reset}"
     fi
 }
 
