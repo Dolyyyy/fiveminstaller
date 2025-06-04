@@ -365,18 +365,20 @@ function selectVersion(){
         if [[ "${non_interactive}" == "false" ]]; then
             echo -e "${red}${bold}ERROR:${reset} Could not retrieve versions from FiveM server."
             echo -e "${yellow}Do you want to specify a custom download URL?${reset}"
-            select option in "Yes" "No (exit)"; do
-                case $option in
-                    "Yes")
-                        echo -e "${bold}Enter the direct download URL for the FiveM artifact:${reset}"
-                        read -p "> " artifacts_version
-                        return
-                        ;;
-                    "No (exit)")
-                        cleanup_and_exit 1 "Installation cancelled by user."
-                        ;;
-                esac
-            done
+            
+            export OPTIONS=("Yes" "No (exit)")
+            bashSelect
+            
+            case $? in
+                0)
+                    echo -e "${bold}Enter the direct download URL for the FiveM artifact:${reset}"
+                    read -p "> " artifacts_version
+                    return
+                    ;;
+                1)
+                    cleanup_and_exit 1 "Installation cancelled by user."
+                    ;;
+            esac
         else
             cleanup_and_exit 1 "Could not retrieve FiveM versions in non-interactive mode."
         fi
@@ -396,18 +398,21 @@ function selectVersion(){
     if [[ "${artifacts_version}" == "0" ]]; then
         if [[ "${non_interactive}" == "false" ]]; then
             status "Select a runtime version"
-            echo -e "${cyan}FiveM requires a runtime version to operate. Select from the options below:${reset}"
+            echo -e "${cyan}FiveM requires a runtime version to operate. Select from the options below:${reset}\n"
             
-            # Format version numbers - avoid complex escapes
-            echo -e "  0) Latest version -> ${bold}${green}$latest${reset} (newest, may be experimental)"
-            echo -e "  1) Latest recommended version -> ${bold}${yellow}$latest_recommended${reset} (stable, recommended for production)"
-            echo -e "  2) Choose custom version (advanced)"
-            echo -e "  3) Exit without installing"
-            echo ""
-            read -p "Your choice [0-3]: " version_choice
+            # Create options array for bashSelect
+            export OPTIONS=(
+                "Latest version → ${latest} (newest, may be experimental)"
+                "Latest recommended version → ${latest_recommended} (stable, recommended for production)"
+                "Choose custom version (advanced)"
+                "Exit without installing"
+            )
+            
+            bashSelect
+            version_choice=$?
             
             case $version_choice in
-                0|"")
+                0)
                     artifacts_version="https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/${full_latest}/fx.tar.xz"
                     log "INFO" "Selected version: latest version ($latest)"
                     echo -e "${green}Selected version:${reset} Latest version (${bold}$latest${reset})"
@@ -425,30 +430,40 @@ function selectVersion(){
                     # Get more versions to choose from
                     local all_full_versions=$(curl -s https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/ | grep -oP '[0-9]+\.[0-9]+\.[0-9]+/' | sort -Vr)
                     
-                    # Display versions with numbers
-                    local i=1
+                    # Create array of versions for bashSelect
+                    local version_options=()
+                    local version_urls=()
+                    local i=0
+                    
                     echo -e "${cyan}Recent versions:${reset}"
-                    echo "$all_full_versions" | head -10 | while read version; do
-                        # Extract just the version number (remove trailing slash)
-                        clean_version=${version%/}
-                        echo -e "$i) ${bold}${clean_version}${reset}"
-                        i=$((i+1))
-                    done
+                    while read version && [ $i -lt 10 ]; do
+                        if [ -n "$version" ]; then
+                            # Extract just the version number (remove trailing slash)
+                            clean_version=${version%/}
+                            version_options+=("Version ${clean_version}")
+                            version_urls+=("https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/$clean_version/fx.tar.xz")
+                            i=$((i+1))
+                        fi
+                    done <<< "$all_full_versions"
                     
-                    # Allow direct version entry or URL entry
-                    echo
-                    echo -e "${yellow}Enter a version number from the list above, or paste a complete download URL:${reset}"
-                    read -p "> " custom_version
+                    # Add option for custom URL
+                    version_options+=("Enter custom version or URL")
+                    version_options+=("Go back to main version selection")
                     
-                    # Check if it's a number or a URL
-                    if [[ "$custom_version" =~ ^[0-9]+$ ]] && [ "$custom_version" -ge 1 ] && [ "$custom_version" -le 10 ]; then
-                        # It's an index number, get the corresponding version
-                        selected_version=$(echo "$all_full_versions" | sed -n "${custom_version}p" | tr -d '/')
-                        artifacts_version="https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/$selected_version/fx.tar.xz"
-                        log "INFO" "Selected version by index: $selected_version"
-                        echo -e "${green}Selected version:${reset} ${bold}$selected_version${reset}"
-                    else
-                        # Assume it's a URL or direct version
+                    export OPTIONS=("${version_options[@]}")
+                    bashSelect
+                    selected_index=$?
+                    
+                    if [ $selected_index -eq $((${#version_options[@]} - 1)) ]; then
+                        # Go back to main selection
+                        selectVersion
+                        return
+                    elif [ $selected_index -eq $((${#version_options[@]} - 2)) ]; then
+                        # Custom version/URL entry
+                        echo -e "${yellow}Enter a version number or paste a complete download URL:${reset}"
+                        read -p "> " custom_version
+                        
+                        # Check if it's a URL
                         if [[ "$custom_version" =~ ^https?:// ]]; then
                             artifacts_version="$custom_version"
                         else
@@ -456,16 +471,17 @@ function selectVersion(){
                         fi
                         log "INFO" "Custom version/URL selected: $artifacts_version"
                         echo -e "${green}Custom selection:${reset} ${bold}$artifacts_version${reset}"
+                    else
+                        # Selected a version from the list
+                        artifacts_version="${version_urls[$selected_index]}"
+                        selected_version=$(echo "${version_options[$selected_index]}" | sed 's/Version //')
+                        log "INFO" "Selected version by index: $selected_version"
+                        echo -e "${green}Selected version:${reset} ${bold}$selected_version${reset}"
                     fi
                     ;;
                 3)
                     log "INFO" "Installation cancelled by user"
                     cleanup_and_exit 0 "${yellow}Installation cancelled by user.${reset}"
-                    ;;
-                *)
-                    echo -e "${red}Invalid choice. Using latest recommended version.${reset}"
-                    artifacts_version="https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/${full_latest_recommended}/fx.tar.xz"
-                    log "INFO" "Invalid choice. Using latest recommended version: $latest_recommended"
                     ;;
             esac
 
