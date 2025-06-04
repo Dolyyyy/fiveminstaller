@@ -1188,23 +1188,18 @@ EOF
                 break
             fi
             printf "."
-        sleep 1
+            sleep 1
         done
 
         echo
         
-        if [ "$started" = false ]; then
-            log "ERROR" "TxAdmin did not start in the expected time"
-            echo -e "${red}${bold}WARNING:${reset} TxAdmin did not start in the expected time."
-            echo -e "${yellow}You may need to manually start it using:${reset} ${bold}sh $dir/start.sh${reset}"
-            echo -e "${yellow}Check the logs for more information:${reset} ${bold}less /tmp/fivem.log${reset}"
-        else
+        if [ "$started" = true ]; then
             log "SUCCESS" "TxAdmin started successfully"
             
             # Extract the PIN from the log file
             # TxAdmin displays the PIN in a box format like:
             # ┃   Use the PIN below to register:   ┃
-            # ┃                1465                ┃
+            # ┃                1981                ┃
             
             # First, try to extract the PIN from the box format
             pin=$(grep -A 2 "Use the PIN below to register" /tmp/fivem.log | grep -E "┃\s*[0-9]+\s*┃" | grep -oE "[0-9]+")
@@ -1263,7 +1258,7 @@ EOF
             echo -e "${blue}View Console:${reset}   ${bold}sh $dir/attach.sh${reset}"
             echo -e "${blue}Update Server:${reset}  ${bold}sh $dir/update.sh${reset}"
 
-        if [[ "$install_phpmyadmin" == "true" ]]; then
+            if [[ "$install_phpmyadmin" == "true" ]]; then
                 echo -e "\n${bold}${yellow}DATABASE INFORMATION${reset}"
                 # Get database credentials from MariaDB files
                 if [ -f "/root/.mariadbPhpma" ]; then
@@ -1273,15 +1268,15 @@ EOF
                 
                 rootPasswordMariaDB=""
                 if [ -f "/root/.mariadbRoot" ]; then
-            rootPasswordMariaDB=$( cat /root/.mariadbRoot )
-            rm /root/.mariadbRoot
+                    rootPasswordMariaDB=$( cat /root/.mariadbRoot )
+                    rm /root/.mariadbRoot
                 fi
                 
                 # Create FiveM database and user
-            fivempasswd=$( pwgen 32 1 );
+                fivempasswd=$( pwgen 32 1 );
                 if [ -n "$rootPasswordMariaDB" ]; then
                     mariadb -u root -p$rootPasswordMariaDB -e "CREATE DATABASE IF NOT EXISTS fivem;"
-            mariadb -u root -p$rootPasswordMariaDB -e "GRANT ALL PRIVILEGES ON fivem.* TO 'fivem'@'localhost' IDENTIFIED BY '${fivempasswd}';"
+                    mariadb -u root -p$rootPasswordMariaDB -e "GRANT ALL PRIVILEGES ON fivem.* TO 'fivem'@'localhost' IDENTIFIED BY '${fivempasswd}';"
                     mariadb -u root -p$rootPasswordMariaDB -e "FLUSH PRIVILEGES;"
                     
                     echo -e "${blue}Database Name:${reset} ${bold}fivem${reset}"
@@ -1305,6 +1300,11 @@ EOF
             
             echo -e "\n${bold}${green}Installation information has been saved to:${reset} $dir/installation_info.txt"
             echo -e "${yellow}Please save this information for future reference!${reset}\n"
+        else
+            log "ERROR" "TxAdmin did not start in the expected time"
+            echo -e "${red}${bold}WARNING:${reset} TxAdmin did not start in the expected time."
+            echo -e "${yellow}You may need to manually start it using:${reset} ${bold}sh $dir/start.sh${reset}"
+            echo -e "${yellow}Check the logs for more information:${reset} ${bold}less /tmp/fivem.log${reset}"
         fi
     else
         log "ERROR" "TxAdmin port 40120 is already in use"
