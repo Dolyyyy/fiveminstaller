@@ -304,11 +304,13 @@ get_default_dir() {
     
     # If we still don't have a user, default to root
     if [ -z "$current_user" ] || [ "$current_user" == "root" ]; then
-        log "DEBUG" "Running as root or couldn't determine user, setting default directory to /home/FiveM"
+        # Log only to file, not to console
+        log "DEBUG" "Running as root or couldn't determine user, setting default directory to /home/FiveM" >> "$LOG_FILE"
         echo "/home/FiveM"
     else
         local home_dir="/home/$current_user/FiveM"
-        log "DEBUG" "Running as $current_user, setting default directory to $home_dir"
+        # Log only to file, not to console
+        log "DEBUG" "Running as $current_user, setting default directory to $home_dir" >> "$LOG_FILE"
         echo "$home_dir"
     fi
 }
