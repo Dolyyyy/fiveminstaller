@@ -18,6 +18,8 @@ green='\033[0;32m'
 red='\033[0;31m'
 white='\033[0;37m'
 reset='\033[0;0m'
+blue='\033[0;34m'
+yellow='\033[0;33m'
 
 non_interactive=false
 db_user=0
@@ -28,13 +30,23 @@ remove_db=false
 remove_pma=false
 
 status(){
-  clear
-  if [[ "$2" == "/" ]]; then
-    echo -e $green$1$reset
-  else
-    echo -e $green$@'...'$reset
+  # Don't clear screen during non-interactive installation to show progress
+  if [[ "${non_interactive}" == "false" ]]; then
+    clear
   fi
-  sleep 1
+  
+  if [[ "$2" == "/" ]]; then
+    echo -e "${green}${1}${reset}"
+  else
+    echo -e "${green}${@}...${reset}"
+  fi
+  
+  # Reduce sleep time to make installation feel faster
+  if [[ "${non_interactive}" == "false" ]]; then
+    sleep 1
+  else
+    sleep 0.2
+  fi
 }
 
 runCommand(){
@@ -318,16 +330,20 @@ function dbInstall(){
 
 function pmaInstall() {
 
+  echo -e "  ${yellow}➤ Downloading phpMyAdmin...${reset}"
   runCommand "wget https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-languages.zip" "downloading PHPMyAdmin"
 
+  echo -e "  ${yellow}➤ Extracting phpMyAdmin...${reset}"
   runCommand "unzip phpMyAdmin-latest-all-languages.zip" "unpacking PHPMyAdmin"
 
   runCommand "rm phpMyAdmin-latest-all-languages.zip"
 
+  echo -e "  ${yellow}➤ Installing phpMyAdmin files...${reset}"
   runCommand "mv phpMyAdmin-* /usr/share/phpmyadmin" "moving files"
 
   runCommand "mkdir -p /var/lib/phpmyadmin/tmp"
 
+  echo -e "  ${yellow}➤ Configuring phpMyAdmin...${reset}"
   runCommand "cp /usr/share/phpmyadmin/config.sample.inc.php /usr/share/phpmyadmin/config.inc.php" "editing config"
 
   runCommand "sed -i 's/\$cfg\[\x27blowfish_secret\x27\] = \x27\x27\; \/\* YOU MUST FILL IN THIS FOR COOKIE AUTH! \*\//\$cfg\[\x27blowfish_secret\x27\] = \x27'${blowfish_secret}'\x27\; \/\* YOU MUST FILL IN THIS FOR COOKIE AUTH! \*\//' /usr/share/phpmyadmin/config.inc.php"
@@ -384,8 +400,10 @@ function pmaInstall() {
 
   runCommand "printf \"\\\$cfg[\'TempDir\'] = \'/var/lib/phpmyadmin/tmp\';\" >> /usr/share/phpmyadmin/config.inc.php"
 
+  echo -e "  ${yellow}➤ Setting up permissions...${reset}"
   runCommand "chown -R www-data:www-data /var/lib/phpmyadmin" "rights are granted"
 
+  echo -e "  ${yellow}➤ Creating phpMyAdmin database tables...${reset}"
   runCommand "service mariadb start || service mysql start || systemctl start mariadb" "importing PHPMyAdmin's \"creating_tables.sql\""
 
   runCommand "mariadb -u root -p${rootPasswordMariaDB} < /usr/share/phpmyadmin/sql/create_tables.sql"
@@ -395,11 +413,15 @@ function mainPart() {
 
   runCommand "ls /etc/apt/sources.list.d/php* >/dev/null 2>&1 && rm /etc/apt/sources.list.d/php* || echo 0"
 
-  runCommand "apt -y update" "updating"
+  echo -e "\n${green}=== Database Installation Progress ===${reset}"
+  echo -e "${blue}Step 1/8: Updating system packages...${reset}"
+  runCommand "apt -y update" "updating package lists"
 
+  echo -e "${blue}Step 2/8: Upgrading system packages...${reset}"
   runCommand "apt -y upgrade"
 
   # Add MariaDB 11.4 repository for latest version
+  echo -e "${blue}Step 3/8: Setting up MariaDB 11.4 repository...${reset}"
   status "Adding MariaDB 11.4 repository"
   runCommand "apt install -y apt-transport-https curl gnupg lsb-release"
   
@@ -423,16 +445,22 @@ function mainPart() {
   runCommand "sh -c \"echo '$MARIADB_REPO' > /etc/apt/sources.list.d/mariadb.list\""
   
   # Update package list with new repository
+  echo -e "${blue}Step 4/8: Updating package lists with MariaDB repository...${reset}"
   runCommand "apt -y update"
 
+  echo -e "${blue}Step 5/8: Installing Apache2, MariaDB 11.4, and required packages...${reset}"
+  echo -e "${yellow}This step may take several minutes depending on your internet connection...${reset}"
   runCommand "apt install -y apache2 mariadb-server=1:11.4* mariadb-client=1:11.4* pwgen expect iproute2 wget zip apt-transport-https lsb-release ca-certificates curl dialog" "installing necessary packages with MariaDB 11.4"
 
+  echo -e "${blue}Step 6/8: Starting MariaDB service...${reset}"
   runCommand "service mariadb start || service mysql start || systemctl start mariadb"
 
+  echo -e "${blue}Step 7/8: Configuring MariaDB security and phpMyAdmin...${reset}"
   dbInstall
 
   pmaInstall
 
+  echo -e "${blue}Step 8/8: Finalizing installation...${reset}"
   runCommand "service mariadb restart || service mysql restart || systemctl restart mariadb"
 
   runCommand "mariadb -u root -p${rootPasswordMariaDB} -e \"GRANT SELECT, INSERT, UPDATE, DELETE ON phpmyadmin.* TO 'pma'@'localhost' IDENTIFIED BY '${pmaPassword}'\"" "creating MySQL users and granting privileges"
