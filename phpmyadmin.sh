@@ -93,6 +93,51 @@ log() {
     fi
 }
 
+# Function to show loading animation
+show_loading() {
+    local message="$1"
+    local pid="$2"
+    local delay=0.5
+    local spinstr='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    
+    echo -ne "${blue}${message}${reset} "
+    
+    while kill -0 "$pid" 2>/dev/null; do
+        local temp=${spinstr#?}
+        printf "\r${blue}${message}${reset} [${cyan}%c${reset}] " "$spinstr"
+        local spinstr=$temp${spinstr%"$temp"}
+        sleep $delay
+    done
+    
+    # Clear the spinner and show completion
+    printf "\r${blue}${message}${reset} [${green}✓${reset}] \n"
+}
+
+# Function to show dots loading for long operations
+show_dots_loading() {
+    local message="$1"
+    local pid="$2"
+    local delay=1
+    local dots=""
+    local max_dots=20
+    
+    echo -ne "${blue}${message}${reset}"
+    
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ ${#dots} -ge $max_dots ]; then
+            dots=""
+            printf "\r${blue}${message}${reset}                    "
+            printf "\r${blue}${message}${reset}"
+        fi
+        dots="${dots}."
+        printf "${cyan}.${reset}"
+        sleep $delay
+    done
+    
+    # Show completion
+    printf " ${green}[Terminé]${reset}\n"
+}
+
 # Initialize logging
 setup_logging
 
@@ -124,6 +169,7 @@ runCommand(){
     LOG_MSG=${2:-"Executing command"}
     HIDE_OUTPUT=${3:-0}
     CRITICAL=${4:-1}  # Default to critical for phpMyAdmin script
+    SHOW_LOADING=${5:-0}  # New parameter to show loading animation
 
     log "DEBUG" "Command: $COMMAND"
     log "INFO" "$LOG_MSG"
@@ -142,14 +188,32 @@ runCommand(){
         fi
     fi
 
-    # Execute with appropriate output redirection
+    # Execute with appropriate output redirection and loading animation
     if [ "$HIDE_OUTPUT" -eq 1 ]; then
-        eval $COMMAND >> "$LOG_FILE" 2>&1
+        if [ "$SHOW_LOADING" -eq 1 ]; then
+            # Run command in background and show loading
+            eval $COMMAND >> "$LOG_FILE" 2>&1 &
+            local cmd_pid=$!
+            show_dots_loading "$LOG_MSG" $cmd_pid
+            wait $cmd_pid
+            BASH_CODE=$?
+        else
+            eval $COMMAND >> "$LOG_FILE" 2>&1
+            BASH_CODE=$?
+        fi
     else
-        eval $COMMAND 2>&1 | tee -a "$LOG_FILE"
+        if [ "$SHOW_LOADING" -eq 1 ]; then
+            # For visible output with loading, we can't easily show both
+            # So we just show a simple message
+            echo -e "${blue}${LOG_MSG}...${reset}"
+            eval $COMMAND 2>&1 | tee -a "$LOG_FILE"
+            BASH_CODE=$?
+        else
+            eval $COMMAND 2>&1 | tee -a "$LOG_FILE"
+            BASH_CODE=$?
+        fi
     fi
 
-    BASH_CODE=$?
     if [ $BASH_CODE -ne 0 ]; then
         log "ERROR" "Command failed with exit code $BASH_CODE: $COMMAND"
         
@@ -480,24 +544,24 @@ function dbInstall(){
 function pmaInstall() {
 
   echo -e "  ${cyan}➤ Downloading phpMyAdmin...${reset}"
-  runCommand "wget https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-languages.zip" "Downloading phpMyAdmin" 1 1
+  runCommand "wget https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-languages.zip" "Downloading phpMyAdmin" 1 1 1
 
   echo -e "  ${cyan}➤ Extracting phpMyAdmin...${reset}"
-  runCommand "unzip phpMyAdmin-latest-all-languages.zip" "Extracting phpMyAdmin" 1 1
+  runCommand "unzip phpMyAdmin-latest-all-languages.zip" "Extracting phpMyAdmin" 1 1 1
 
-  runCommand "rm phpMyAdmin-latest-all-languages.zip" "Removing downloaded archive" 1 0
+  runCommand "rm phpMyAdmin-latest-all-languages.zip" "Removing downloaded archive" 1 0 0
 
   echo -e "  ${cyan}➤ Installing phpMyAdmin files...${reset}"
-  runCommand "mv phpMyAdmin-* /usr/share/phpmyadmin" "Moving phpMyAdmin files" 1 1
+  runCommand "mv phpMyAdmin-* /usr/share/phpmyadmin" "Moving phpMyAdmin files" 1 1 0
 
-  runCommand "mkdir -p /var/lib/phpmyadmin/tmp" "Creating temporary directory" 1 1
+  runCommand "mkdir -p /var/lib/phpmyadmin/tmp" "Creating temporary directory" 1 1 0
 
   echo -e "  ${cyan}➤ Configuring phpMyAdmin...${reset}"
-  runCommand "cp /usr/share/phpmyadmin/config.sample.inc.php /usr/share/phpmyadmin/config.inc.php" "Copying configuration file" 1 1
+  runCommand "cp /usr/share/phpmyadmin/config.sample.inc.php /usr/share/phpmyadmin/config.inc.php" "Copying configuration file" 1 1 0
 
   # Configuration of phpMyAdmin settings
   log "INFO" "Configuring phpMyAdmin settings"
-  runCommand "sed -i 's/\$cfg\[\x27blowfish_secret\x27\] = \x27\x27\; \/\* YOU MUST FILL IN THIS FOR COOKIE AUTH! \*\//\$cfg\[\x27blowfish_secret\x27\] = \x27'${blowfish_secret}'\x27\; \/\* YOU MUST FILL IN THIS FOR COOKIE AUTH! \*\//' /usr/share/phpmyadmin/config.inc.php" "Configuring blowfish secret" 1 1
+  runCommand "sed -i 's/\$cfg\[\x27blowfish_secret\x27\] = \x27\x27\; \/\* YOU MUST FILL IN THIS FOR COOKIE AUTH! \*\//\$cfg\[\x27blowfish_secret\x27\] = \x27'${blowfish_secret}'\x27\; \/\* YOU MUST FILL IN THIS FOR COOKIE AUTH! \*\//' /usr/share/phpmyadmin/config.inc.php" "Configuring blowfish secret" 1 1 0
 
   # Configuration of phpMyAdmin control tables
   local config_commands=(
@@ -523,24 +587,24 @@ function pmaInstall() {
   done
 
   if [[ "${rootLogin}" == "n" ]]; then
-    runCommand "echo \"\\\$cfg['Servers'][\\\$i]['export_templates'] = false;\" >> /usr/share/phpmyadmin/config.inc.php" "Disabling root access" 1 1
+    runCommand "echo \"\\\$cfg['Servers'][\\\$i]['export_templates'] = false;\" >> /usr/share/phpmyadmin/config.inc.php" "Disabling root access" 1 1 0
   fi
 
-  runCommand "printf \"\\\$cfg[\'TempDir\'] = \'/var/lib/phpmyadmin/tmp\';\" >> /usr/share/phpmyadmin/config.inc.php" "Configuring temporary directory" 1 1
+  runCommand "printf \"\\\$cfg[\'TempDir\'] = \'/var/lib/phpmyadmin/tmp\';\" >> /usr/share/phpmyadmin/config.inc.php" "Configuring temporary directory" 1 1 0
 
   echo -e "  ${cyan}➤ Configuring permissions...${reset}"
-  runCommand "chown -R www-data:www-data /var/lib/phpmyadmin" "Setting permissions" 1 1
+  runCommand "chown -R www-data:www-data /var/lib/phpmyadmin" "Setting permissions" 1 1 0
 
   echo -e "  ${cyan}➤ Creating phpMyAdmin database tables...${reset}"
-  runCommand "service mariadb start || service mysql start || systemctl start mariadb" "Starting MariaDB service" 1 1
+  runCommand "service mariadb start || service mysql start || systemctl start mariadb" "Starting MariaDB service" 1 1 0
 
-  runCommand "mariadb -u root -p${rootPasswordMariaDB} < /usr/share/phpmyadmin/sql/create_tables.sql" "Importing phpMyAdmin tables" 1 1
+  runCommand "mariadb -u root -p${rootPasswordMariaDB} < /usr/share/phpmyadmin/sql/create_tables.sql" "Importing phpMyAdmin tables" 1 1 1
   
   # Create phpMyAdmin control user after tables are created
   echo -e "  ${cyan}➤ Creating phpMyAdmin control user...${reset}"
-  runCommand "mariadb -u root -p${rootPasswordMariaDB} -e \"CREATE USER IF NOT EXISTS 'pma'@'localhost' IDENTIFIED BY '${pmaPassword}';\"" "Creating phpMyAdmin control user" 1 1
-  runCommand "mariadb -u root -p${rootPasswordMariaDB} -e \"GRANT SELECT, INSERT, UPDATE, DELETE ON phpmyadmin.* TO 'pma'@'localhost';\"" "Granting privileges to phpMyAdmin control user" 1 1
-  runCommand "mariadb -u root -p${rootPasswordMariaDB} -e \"FLUSH PRIVILEGES;\"" "Flushing privileges" 1 1
+  runCommand "mariadb -u root -p${rootPasswordMariaDB} -e \"CREATE USER IF NOT EXISTS 'pma'@'localhost' IDENTIFIED BY '${pmaPassword}';\"" "Creating phpMyAdmin control user" 1 1 0
+  runCommand "mariadb -u root -p${rootPasswordMariaDB} -e \"GRANT SELECT, INSERT, UPDATE, DELETE ON phpmyadmin.* TO 'pma'@'localhost';\"" "Granting privileges to phpMyAdmin control user" 1 1 0
+  runCommand "mariadb -u root -p${rootPasswordMariaDB} -e \"FLUSH PRIVILEGES;\"" "Flushing privileges" 1 1 0
 }
 
 function mainPart() {
@@ -554,15 +618,15 @@ function mainPart() {
 
   echo -e "${green}=== Database Installation Progress ===${reset}"
   echo -e "${blue}Step 1/8: Updating system packages...${reset}"
-  runCommand "apt -y update" "Updating package list" 1 1
+  runCommand "apt -y update" "Updating package list" 1 1 1
 
   echo -e "${blue}Step 2/8: Upgrading system packages...${reset}"
-  runCommand "apt -y upgrade" "Upgrading system packages" 1 1
+  runCommand "apt -y upgrade" "Upgrading system packages" 1 1 1
 
   # Add MariaDB 11.4 repository for latest version
   echo -e "${blue}Step 3/8: Setting up MariaDB 11.4 repository...${reset}"
   status "Adding MariaDB 11.4 repository"
-  runCommand "apt install -y apt-transport-https curl gnupg lsb-release" "Installing repository tools" 1 1
+  runCommand "apt install -y apt-transport-https curl gnupg lsb-release" "Installing repository tools" 1 1 1
   
   # Detect distribution and set appropriate repository
   eval $( cat /etc/*release* )
@@ -582,19 +646,19 @@ function mainPart() {
   
   log "INFO" "Adding MariaDB repository for $DISTRO $CODENAME"
   echo -e "${blue}Adding MariaDB repository for $DISTRO $CODENAME${reset}"
-  runCommand "curl -o /etc/apt/trusted.gpg.d/mariadb_release_signing_key.asc 'https://mariadb.org/mariadb_release_signing_key.asc'" "Downloading MariaDB GPG key" 1 1
-  runCommand "sh -c \"echo '$MARIADB_REPO' > /etc/apt/sources.list.d/mariadb.list\"" "Configuring MariaDB repository" 1 1
+  runCommand "curl -o /etc/apt/trusted.gpg.d/mariadb_release_signing_key.asc 'https://mariadb.org/mariadb_release_signing_key.asc'" "Downloading MariaDB GPG key" 1 1 0
+  runCommand "sh -c \"echo '$MARIADB_REPO' > /etc/apt/sources.list.d/mariadb.list\"" "Configuring MariaDB repository" 1 1 0
   
   # Update package list with new repository
   echo -e "${blue}Step 4/8: Updating package lists with MariaDB repository...${reset}"
-  runCommand "apt -y update" "Updating with new repository" 1 1
+  runCommand "apt -y update" "Updating with new repository" 1 1 1
 
   echo -e "${blue}Step 5/8: Installing Apache2, MariaDB 11.4, and required packages...${reset}"
   echo -e "${yellow}This step may take several minutes depending on your internet connection...${reset}"
-  runCommand "apt install -y apache2 mariadb-server=1:11.4* mariadb-client=1:11.4* pwgen expect iproute2 wget zip apt-transport-https lsb-release ca-certificates curl dialog" "Installing necessary packages with MariaDB 11.4" 1 1
+  runCommand "apt install -y apache2 mariadb-server=1:11.4* mariadb-client=1:11.4* pwgen expect iproute2 wget zip apt-transport-https lsb-release ca-certificates curl dialog" "Installing necessary packages with MariaDB 11.4" 1 1 1
 
   echo -e "${blue}Step 6/8: Starting MariaDB service...${reset}"
-  runCommand "service mariadb start || service mysql start || systemctl start mariadb" "Starting MariaDB service" 1 1
+  runCommand "service mariadb start || service mysql start || systemctl start mariadb" "Starting MariaDB service" 1 1 0
 
   echo -e "${blue}Step 7/8: Configuring MariaDB security and phpMyAdmin...${reset}"
   dbInstall
@@ -602,7 +666,7 @@ function mainPart() {
   pmaInstall
 
   echo -e "${blue}Step 8/8: Finalizing installation...${reset}"
-  runCommand "service mariadb restart || service mysql restart || systemctl restart mariadb" "Restarting MariaDB service" 1 1
+  runCommand "service mariadb restart || service mysql restart || systemctl restart mariadb" "Restarting MariaDB service" 1 1 0
 
   if [[ "${rootLogin}" == "n" ]]; then
     echo -e "  ${cyan}➤ Creating dedicated database user...${reset}"
