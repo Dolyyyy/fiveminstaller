@@ -1212,52 +1212,70 @@ EOF
         if [ "$started" = true ]; then
             log "SUCCESS" "TxAdmin started successfully"
             
-            # Extract the PIN from the log file
-            # TxAdmin displays the PIN in a box format like:
-            # ┃   Use the PIN below to register:   ┃
-            # ┃                3257                ┃
+            # Wait specifically for the PIN to be displayed in the box format
+            echo -e "${blue}Waiting for PIN to be generated...${reset}"
+            local pin_attempts=30
+            local pin_found=false
             
-            # First, try to extract the PIN from the box format - look for exactly 4 digits
-            pin=$(grep -A 2 "Use the PIN below to register" /tmp/fivem.log | grep -E "┃\s*[0-9]{4}\s*┃" | grep -oE "[0-9]{4}")
-            
-            # If that doesn't work, try to find the PIN line directly
-            if [ -z "$pin" ]; then
-                # Look for the specific pattern with the PIN in the box
-                pin=$(grep -E "┃\s*[0-9]{4}\s*┃" /tmp/fivem.log | grep -oE "[0-9]{4}" | head -1)
-            fi
-            
-            # If still no PIN found, try other common formats
-            if [ -z "$pin" ]; then
-                # Try to find PIN with different patterns - look for exactly 4 digits after PIN text
-                pin=$(grep -i "pin" /tmp/fivem.log | grep -oE "[0-9]{4}" | head -1)
-            fi
-            
-            # If still no PIN found, try the old method as fallback
-            if [ -z "$pin" ]; then
-                cat -v /tmp/fivem.log > /tmp/fivem.log.tmp
-                pin_line=$(grep -n "PIN" /tmp/fivem.log.tmp | head -1 | cut -d':' -f1)
-                
-                if [ -n "$pin_line" ]; then
-                    # Extract only 4-digit numbers from the PIN line
-                    pin=$(sed -n "${pin_line}p" /tmp/fivem.log.tmp | grep -oE "[0-9]{4}" | head -1)
+            for ((j=1; j<=pin_attempts; j++)); do
+                # Check if the PIN box is displayed
+                if grep -q "Use the PIN below to register" /tmp/fivem.log 2>/dev/null; then
+                    # Wait a bit more to ensure the PIN line is written
+                    sleep 2
+                    pin_found=true
+                    break
                 fi
-                rm -f /tmp/fivem.log.tmp
-            fi
+                printf "."
+                sleep 1
+            done
             
-            # Final fallback - look for any 4-digit number in the entire log
-            if [ -z "$pin" ]; then
-                pin=$(grep -oE "[0-9]{4}" /tmp/fivem.log | tail -1)
-            fi
+            echo
             
-            # Validate that we have exactly a 4-digit PIN
-            if [[ "$pin" =~ ^[0-9]{4}$ ]]; then
-                log "INFO" "PIN extracted: $pin"
+            if [ "$pin_found" = true ]; then
+                log "INFO" "PIN box detected, extracting PIN"
+                
+                # Extract the PIN from the log file
+                # TxAdmin displays the PIN in a box format like:
+                # ┃   Use the PIN below to register:   ┃
+                # ┃                5598                ┃
+                
+                # First, try to extract the PIN from the box format - look for exactly 4 digits
+                pin=$(grep -A 2 "Use the PIN below to register" /tmp/fivem.log | grep -E "┃\s*[0-9]{4}\s*┃" | grep -oE "[0-9]{4}" | tail -1)
+                
+                # If that doesn't work, try to find the PIN line directly
+                if [ -z "$pin" ]; then
+                    # Look for the specific pattern with the PIN in the box
+                    pin=$(grep -E "┃\s*[0-9]{4}\s*┃" /tmp/fivem.log | grep -oE "[0-9]{4}" | tail -1)
+                fi
+                
+                # If still no PIN found, try other common formats
+                if [ -z "$pin" ]; then
+                    # Try to find PIN with different patterns - look for exactly 4 digits after PIN text
+                    pin=$(grep -A 5 "Use the PIN below to register" /tmp/fivem.log | grep -oE "[0-9]{4}" | tail -1)
+                fi
+                
+                # Final fallback - look for the last 4-digit number in the entire log
+                if [ -z "$pin" ]; then
+                    pin=$(grep -oE "[0-9]{4}" /tmp/fivem.log | tail -1)
+                fi
+                
+                # Validate that we have exactly a 4-digit PIN
+                if [[ "$pin" =~ ^[0-9]{4}$ ]]; then
+                    log "INFO" "PIN extracted successfully: $pin"
+                else
+                    pin="unknown"
+                    log "WARN" "Could not extract valid 4-digit PIN from logs. Found: '$pin'"
+                    # Debug: show the last few lines of the log
+                    log "DEBUG" "Last 10 lines of fivem.log:"
+                    tail -10 /tmp/fivem.log >> "$LOG_FILE" 2>&1
+                fi
             else
                 pin="unknown"
-                log "WARN" "Could not extract valid 4-digit PIN from logs. Found: '$pin'"
+                log "WARN" "PIN box was not detected in the expected time"
+                # Debug: show the last few lines of the log
+                log "DEBUG" "Last 10 lines of fivem.log:"
+                tail -10 /tmp/fivem.log >> "$LOG_FILE" 2>&1
             fi
-            
-            rm -f /tmp/fivem.log.tmp
             
             # Get the server IP address and TxAdmin URL
             server_ip=$(ip route get 1.1.1.1 | awk '{print $7; exit}')
