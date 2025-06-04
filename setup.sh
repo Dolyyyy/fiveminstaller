@@ -864,7 +864,7 @@ function installPma(){
     
     if [[ "${install_phpmyadmin}" == "true" ]]; then
         log "INFO" "Installing phpMyAdmin and MariaDB"
-        runCommand "bash <(curl -s https://raw.githubusercontent.com/JulianGransee/PHPMyAdminInstaller/main/install.sh) -s ${pma_options[*]}" "Installing phpMyAdmin and MariaDB/MySQL" 1 1
+        runCommand "bash <(curl -s https://raw.githubusercontent.com/Dolyyyy/fiveminstaller/refs/heads/main/phpmyadmin.sh) -s ${pma_options[*]}" "Installing phpMyAdmin and MariaDB/MySQL" 1 1
     fi
 }
 
@@ -1184,17 +1184,36 @@ EOF
             log "SUCCESS" "TxAdmin started successfully"
             
             # Extract the PIN from the log file
-        cat -v /tmp/fivem.log > /tmp/fivem.log.tmp
-            pin_line=$(grep -n "PIN" /tmp/fivem.log.tmp | head -1 | cut -d':' -f1)
+            # TxAdmin displays the PIN in a box format like:
+            # ┃   Use the PIN below to register:   ┃
+            # ┃                1465                ┃
             
-            if [ -n "$pin_line" ]; then
-                pin=$(sed -n "${pin_line}p" /tmp/fivem.log.tmp | sed -e 's/\^[[^m]*m//g' -e 's/[^0-9]//g')
+            # First, try to extract the PIN from the box format
+            pin=$(grep -A 2 "Use the PIN below to register" /tmp/fivem.log | grep -E "┃\s*[0-9]+\s*┃" | grep -oE "[0-9]+")
+            
+            # If that doesn't work, try other common formats
+            if [ -z "$pin" ]; then
+                # Try to find PIN with different patterns
+                pin=$(grep -oE "PIN.*[^0-9]([0-9]{4})[^0-9]" /tmp/fivem.log | grep -oE "[0-9]{4}")
+            fi
+            
+            # If still no PIN found, try the old method as fallback
+            if [ -z "$pin" ]; then
+                cat -v /tmp/fivem.log > /tmp/fivem.log.tmp
+                pin_line=$(grep -n "PIN" /tmp/fivem.log.tmp | head -1 | cut -d':' -f1)
                 
-                # If PIN extraction failed, try a different approach
-                if [ -z "$pin" ]; then
-                    pin=$(grep -o "PIN: [0-9]\+" /tmp/fivem.log | head -1 | grep -o "[0-9]\+")
+                if [ -n "$pin_line" ]; then
+                    pin=$(sed -n "${pin_line}p" /tmp/fivem.log.tmp | sed -e 's/\^[[^m]*m//g' -e 's/[^0-9]//g')
                 fi
-                
+                rm -f /tmp/fivem.log.tmp
+            fi
+            
+            # Final fallback - extract any 4-digit number near PIN text
+            if [ -z "$pin" ]; then
+                pin=$(grep -i pin /tmp/fivem.log | grep -oE "[0-9]{4}" | head -1)
+            fi
+            
+            if [ -n "$pin" ] && [ "$pin" != "" ]; then
                 log "INFO" "PIN extracted: $pin"
             else
                 pin="unknown"
@@ -1430,7 +1449,7 @@ function main(){
         log "INFO" "Interactive mode enabled"
         
         # Source BashSelect from GitHub
-        if ! source <(curl -s https://raw.githubusercontent.com/JulianGransee/BashSelect.sh/main/BashSelect.sh); then
+        if ! source <(curl -s https://raw.githubusercontent.com/Dolyyyy/fiveminstaller/refs/heads/main/bashselect.sh); then
             log "ERROR" "Failed to source BashSelect script"
             echo -e "${red}${bold}ERROR:${reset} Failed to source the BashSelect script. Check your internet connection."
             exit 1
@@ -1489,7 +1508,7 @@ function main(){
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         -h|--help)
-            echo -e "${bold}Usage: bash <(curl -s https://raw.githubusercontent.com/Twe3x/fivem-installer/main/setup.sh) [OPTIONS]${reset}"
+            echo -e "${bold}Usage: bash <(curl -s https://raw.githubusercontent.com/Dolyyyy/fiveminstaller/refs/heads/main/setup.sh) [OPTIONS]${reset}"
             echo "Options:"
             echo "  -h, --help                      Display this help message."
             echo "      --non-interactive           Skip all interactive prompts by providing all required inputs as options."
