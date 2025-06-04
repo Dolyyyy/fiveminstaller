@@ -459,20 +459,20 @@ function dbInstall(){
 
   if [[ "${alreadyInstalled}" == "true" ]]; then
 
-    runCommand "systemctl stop mysql"
-    runCommand "mysqld_safe --skip-grant-tables --skip-networking &"
-    runCommand "sleep 5"
+    runCommand "systemctl stop mysql" "Stopping MySQL service" 1 1
+    runCommand "mysqld_safe --skip-grant-tables --skip-networking &" "Starting MySQL in safe mode" 1 1
+    runCommand "sleep 5" "Waiting for MySQL to start" 1 0
 
-    mariadb -u root -e "FLUSH PRIVILEGES; ALTER USER 'root'@'localhost' IDENTIFIED BY '$rootPasswordMariaDB';"
-    runCommand "killall mysqld || killall mariadbd"
-    runCommand "systemctl start mysql"
+    runCommand "mariadb -u root -e \"FLUSH PRIVILEGES; ALTER USER 'root'@'localhost' IDENTIFIED BY '$rootPasswordMariaDB';\"" "Resetting root password" 1 1
+    runCommand "killall mysqld || killall mariadbd" "Stopping MySQL safe mode" 1 0
+    runCommand "systemctl start mysql" "Starting MySQL service" 1 1
 
   fi
 
-  mariadb -u root -p$rootPasswordMariaDB -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${rootPasswordMariaDB}';"
-  mariadb -u root -p$rootPasswordMariaDB -e "DELETE FROM mysql.user WHERE User='';"
-  mariadb -u root -p$rootPasswordMariaDB -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');';"
-  mariadb -u root -p$rootPasswordMariaDB -e "FLUSH PRIVILEGES;"
+  runCommand "mariadb -u root -p$rootPasswordMariaDB -e \"ALTER USER 'root'@'localhost' IDENTIFIED BY '${rootPasswordMariaDB}';\"" "Setting root password" 1 1
+  runCommand "mariadb -u root -p$rootPasswordMariaDB -e \"DELETE FROM mysql.user WHERE User='';\"" "Removing anonymous users" 1 1
+  runCommand "mariadb -u root -p$rootPasswordMariaDB -e \"DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');\"" "Removing remote root access" 1 1
+  runCommand "mariadb -u root -p$rootPasswordMariaDB -e \"FLUSH PRIVILEGES;\"" "Flushing privileges" 1 1
 
 
 }
