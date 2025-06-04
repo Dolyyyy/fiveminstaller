@@ -289,39 +289,26 @@ validate_url() {
 
 # Determine the default installation path
 get_default_dir() {
-    # Try multiple methods to detect the current user
-    local current_user=""
+    # Try multiple methods to get the current user
+    local current_user=$(who am i 2>/dev/null | awk '{print $1}')
     
-    # Method 1: Try $SUDO_USER (if script was run with sudo)
-    if [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ]; then
-        current_user="$SUDO_USER"
-        log "DEBUG" "Detected user via SUDO_USER: $current_user"
-    # Method 2: Try who am i
-    elif current_user=$(who am i 2>/dev/null | awk '{print $1}') && [ -n "$current_user" ]; then
-        log "DEBUG" "Detected user via 'who am i': $current_user"
-    # Method 3: Try whoami
-    elif current_user=$(whoami 2>/dev/null) && [ -n "$current_user" ]; then
-        log "DEBUG" "Detected user via 'whoami': $current_user"
-    # Method 4: Try $USER environment variable
-    elif [ -n "$USER" ]; then
-        current_user="$USER"
-        log "DEBUG" "Detected user via USER environment variable: $current_user"
-    # Method 5: Try logname
-    elif current_user=$(logname 2>/dev/null) && [ -n "$current_user" ]; then
-        log "DEBUG" "Detected user via 'logname': $current_user"
-    # Fallback: assume root
-    else
-        current_user="root"
-        log "DEBUG" "Could not detect user, defaulting to root"
+    # If 'who am i' fails, try other methods
+    if [ -z "$current_user" ]; then
+        current_user=$(whoami 2>/dev/null)
     fi
     
-    # If user is root or cannot be determined, use /home/FiveM
-    if [ "$current_user" == "root" ] || [ -z "$current_user" ]; then
-        log "DEBUG" "Using root default directory: /home/FiveM"
+    # If that also fails, try environment variables
+    if [ -z "$current_user" ]; then
+        current_user=${USER:-${USERNAME:-root}}
+    fi
+    
+    # If we still don't have a user, default to root
+    if [ -z "$current_user" ] || [ "$current_user" == "root" ]; then
+        log "DEBUG" "Running as root or couldn't determine user, setting default directory to /home/FiveM"
         echo "/home/FiveM"
     else
         local home_dir="/home/$current_user/FiveM"
-        log "DEBUG" "Setting user directory for $current_user: $home_dir"
+        log "DEBUG" "Running as $current_user, setting default directory to $home_dir"
         echo "$home_dir"
     fi
 }
