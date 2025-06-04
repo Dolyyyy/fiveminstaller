@@ -14,13 +14,26 @@
 #    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #!/bin/bash
-green='\033[0;32m'
-red='\033[0;31m'
-white='\033[0;37m'
-reset='\033[0;0m'
-blue='\033[0;34m'
-yellow='\033[0;33m'
 
+# Colors for messages (harmonized with setup.sh)
+red="\e[0;91m"
+green="\e[0;92m"
+blue="\e[0;94m"
+yellow="\e[0;93m"
+cyan="\e[0;96m"
+magenta="\e[0;95m"
+white="\e[0;37m"
+bold="\e[1m"
+underline="\e[4m"
+reset="\e[0m"
+
+# Log configuration
+TIMESTAMP=$(date "+%Y%m%d_%H%M%S")
+LOG_DIR="/var/log/fivem"
+LOG_FILE="${LOG_DIR}/phpmyadmin_install_${TIMESTAMP}.log"
+
+# Global variables
+script_version="1.2.0"
 non_interactive=false
 db_user=0
 db_password=0
@@ -29,176 +42,312 @@ reset_password=false
 remove_db=false
 remove_pma=false
 
+# Setup logging directory
+setup_logging() {
+    if [ ! -d "$LOG_DIR" ]; then
+        mkdir -p "$LOG_DIR"
+        chmod 755 "$LOG_DIR"
+    fi
+    
+    # Create log file and set permissions
+    touch "$LOG_FILE"
+    chmod 644 "$LOG_FILE"
+    
+    echo "===============================================================" >> "$LOG_FILE"
+    echo "phpMyAdmin Installer v${script_version} - Started: $(date)" >> "$LOG_FILE"
+    echo "===============================================================" >> "$LOG_FILE"
+}
+
+# Enhanced logging function (same as setup.sh)
+log() {
+    local level=$1
+    local message=$2
+    local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
+    local pid=$$
+    local indent=""
+    
+    # Add indentation based on function depth
+    local depth=$(($(caller | wc -l) - 1))
+    if [ $depth -gt 0 ]; then
+        indent=$(printf '%*s' $((depth*2)) '')
+    fi
+    
+    case $level in
+        "INFO") color=$green; prefix="[INFO]    " ;;
+        "ERROR") color=$red; prefix="[ERROR]   " ;;
+        "WARN") color=$yellow; prefix="[WARNING] " ;;
+        "DEBUG") color=$blue; prefix="[DEBUG]   " ;;
+        "SUCCESS") color=$cyan; prefix="[SUCCESS] " ;;
+        "PROMPT") color=$magenta; prefix="[PROMPT]  " ;;
+        *) color=$reset; prefix="[LOG]     " ;;
+    esac
+    
+    # Print to terminal with color
+    echo -e "${timestamp} ${color}${prefix}${reset} ${indent}${message}" | tee -a "$LOG_FILE"
+    
+    # Add extra contextual information to log file only (not to terminal)
+    if [ "$level" == "DEBUG" ] || [ "$level" == "ERROR" ]; then
+        local function_name=$(caller 0 | awk '{print $2}')
+        local line_number=$(caller 0 | awk '{print $1}')
+        echo "             Function: ${function_name}(), Line: ${line_number}, PID: ${pid}" >> "$LOG_FILE"
+    fi
+}
+
+# Initialize logging
+setup_logging
+
 status(){
   # Don't clear screen during non-interactive installation to show progress
   if [[ "${non_interactive}" == "false" ]]; then
     clear
-  fi
-  
-  if [[ "$2" == "/" ]]; then
-    echo -e "${green}${1}${reset}"
-  else
-    echo -e "${green}${@}...${reset}"
-  fi
-  
-  # Reduce sleep time to make installation feel faster
-  if [[ "${non_interactive}" == "false" ]]; then
+    echo -e "${cyan}╔════════════════════════════════════════════════════════════════════════════╗${reset}"
+    echo -e "${cyan}║                                                                            ║${reset}"
+    echo -e "${cyan}║${reset}  ${bold}${green} $@ ${reset}${cyan}  ║${reset}"
+    echo -e "${cyan}║                                                                            ║${reset}"
+    echo -e "${cyan}╚════════════════════════════════════════════════════════════════════════════╝${reset}"
+    log "INFO" "$@..."
     sleep 1
   else
+    if [[ "$2" == "/" ]]; then
+      echo -e "${green}${1}${reset}"
+      log "INFO" "${1}"
+    else
+      echo -e "${green}${@}...${reset}"
+      log "INFO" "${@}..."
+    fi
     sleep 0.2
   fi
 }
 
 runCommand(){
     COMMAND=$1
+    LOG_MSG=${2:-"Executing command"}
+    HIDE_OUTPUT=${3:-0}
+    CRITICAL=${4:-1}  # Default to critical for phpMyAdmin script
 
-    if [[ ! -z "$2" ]]; then
-      status $2
+    log "DEBUG" "Command: $COMMAND"
+    log "INFO" "$LOG_MSG"
+
+    # Check if the command exists before execution
+    if [[ $COMMAND == *" "* ]]; then
+        first_word=$(echo "$COMMAND" | cut -d' ' -f1)
+        if ! command -v $first_word &> /dev/null && [[ ! -f $first_word ]] && [[ ! -e $first_word ]]; then
+            log "ERROR" "Command '$first_word' not found. Please install it first."
+            return 1
+        fi
+    else
+        if ! command -v $COMMAND &> /dev/null && [[ ! -f $COMMAND ]] && [[ ! -e $COMMAND ]]; then
+            log "ERROR" "Command '$COMMAND' not found. Please install it first."
+            return 1
+        fi
     fi
 
-    eval $COMMAND;
+    # Execute with appropriate output redirection
+    if [ "$HIDE_OUTPUT" -eq 1 ]; then
+        eval $COMMAND >> "$LOG_FILE" 2>&1
+    else
+        eval $COMMAND 2>&1 | tee -a "$LOG_FILE"
+    fi
+
     BASH_CODE=$?
     if [ $BASH_CODE -ne 0 ]; then
-      echo -e "${red}An error occurred:${reset} ${white}${COMMAND}${reset}${red} returned${reset} ${white}${BASH_CODE}${reset}"
-      exit ${BASH_CODE}
+        log "ERROR" "Command failed with exit code $BASH_CODE: $COMMAND"
+        
+        # Record detailed error information in the log
+        echo "==================== ERROR DETAILS ====================" >> "$LOG_FILE"
+        echo "Command: $COMMAND" >> "$LOG_FILE"
+        echo "Exit Code: $BASH_CODE" >> "$LOG_FILE"
+        echo "Current Directory: $(pwd)" >> "$LOG_FILE"
+        echo "User: $(whoami)" >> "$LOG_FILE"
+        echo "Date & Time: $(date)" >> "$LOG_FILE"
+        
+        if [ "$CRITICAL" -eq 1 ]; then
+            log "ERROR" "Critical error occurred. Exiting."
+            echo -e "${red}${bold}CRITICAL ERROR:${reset} $LOG_MSG failed."
+            echo -e "Check the log file for details: $LOG_FILE"
+            exit ${BASH_CODE}
+        else
+            log "WARN" "Command failed but continuing as error is non-critical."
+            return ${BASH_CODE}
+        fi
+    else
+        log "SUCCESS" "$LOG_MSG - Completed successfully"
     fi
+    
+    return 0
 }
 
 function input() {
 
-  clear
-
   if [[ "${non_interactive}" == "false" ]]; then
+    status "phpMyAdmin Security Configuration"
+    echo -e "${cyan}phpMyAdmin can be configured with different security levels:${reset}"
+    echo -e "${blue}• Simple root access: Direct connection with MySQL root account${reset}"
+    echo -e "${blue}• Dedicated account: Create a specific user for phpMyAdmin (recommended)${reset}\n"
 
-    status "Create a special account for PHPMyAdmin access (this is going to disable the PHPMyAdmin access with root)?" "/"
-
-    export OPTIONS=("No, keep it simple" "Yes, I want security")
-      bashSelect
-      case $? in
-        0 )
-          status "okay"
-          rootLogin="y"
-        ;;
-        1 )
-          rootLogin="n";
-        ;;
-      esac
+    export OPTIONS=("Keep it simple - Direct root access" "Secure - Create dedicated account (recommended)")
+    bashSelect
+    case $? in
+      0 )
+        rootLogin="y"
+        log "INFO" "User selected: Simple root access"
+        echo -e "${green}Selected:${reset} Simple root access"
+      ;;
+      1 )
+        rootLogin="n"
+        log "INFO" "User selected: Dedicated account"
+        echo -e "${green}Selected:${reset} Secure dedicated account"
+      ;;
+    esac
   fi
 
   if [[ "${rootLogin}" == "y" ]]; then
+    log "INFO" "Using simple root access configuration"
     return 0
   fi
 
-
   if [[ "${non_interactive}" == "false" ]]; then
     if [[ "${db_user}" == "0" ]]; then
-
+      status "Username Configuration"
+      echo -e "${blue}Please enter a username for the MySQL database.${reset}"
+      echo -e "${yellow}This user will be used to connect to phpMyAdmin.${reset}\n"
+      
       #readUname
       while [ -z $dynuser ]; do
         dynuser=$( echo $dynuser | sed 's/ //g' | sed 's/[^a-z]//g' )
-        read -ep $'\e[37mPlease enter a name for the MySQL user you want to use later to log in to PHPMyAdmin:\e[0m ' dynuser;
+        read -ep $'\e[96mMySQL Username:\e[0m ' dynuser;
         if [[ "${dynuser,,%%*( )}" == "root" ]]; then
+          echo -e "${red}Error:${reset} The name 'root' is not allowed for security reasons."
           unset dynuser
         fi
       done
+      log "INFO" "Database username set to: $dynuser"
     fi
     
-
-
     if [[ "${db_password}" == "0" ]]; then
-
-      status "Set a password" "/"
+      status "Password Configuration"
+      echo -e "${blue}Choose how to set the password for the MySQL user.${reset}\n"
             
-        export OPTIONS=("Let the script generate a secure passwort" "No, I will do it myself")
-        bashSelect
-        case $? in
-          0 )
-            generatePassword="true";
-          ;;
-          1 )
-            while [ -z $dynamicUserPassword ]; do
-              read -ep $'\e[37mPassword for \e[0m\e[36m'$dynuser$'\e[0m\e[37m:\e[0m ' dynamicUserPassword;
-            done
-            generatePassword="false";
-            dynamicUserPassword=`echo $dynamicUserPassword | sed 's/ *$//g'`
-            if [[ "${dynamicUserPassword,,%%*( )}" == "auto" ]]; then
-              generatePassword="true";
-            fi
-          ;;
-        esac
+      export OPTIONS=("Generate a secure password automatically (recommended)" "Enter my own password")
+      bashSelect
+      case $? in
+        0 )
+          generatePassword="true"
+          log "INFO" "User selected: Auto-generate password"
+          echo -e "${green}Selected:${reset} Automatic secure password generation"
+        ;;
+        1 )
+          echo -e "${blue}Please enter the password for user ${bold}$dynuser${reset}${blue}:${reset}"
+          while [ -z $dynamicUserPassword ]; do
+            read -ep $'\e[96mPassword:\e[0m ' dynamicUserPassword;
+          done
+          generatePassword="false"
+          dynamicUserPassword=`echo $dynamicUserPassword | sed 's/ *$//g'`
+          if [[ "${dynamicUserPassword,,%%*( )}" == "auto" ]]; then
+            generatePassword="true"
+            log "INFO" "User entered 'auto', switching to auto-generate"
+          else
+            log "INFO" "User provided custom password"
+          fi
+        ;;
+      esac
     fi
   fi
-
 }
 
 function serverCheck() {
-  status "running some checks"
-  mariadb --version
+  status "System Check"
+  log "INFO" "Checking for existing MariaDB installation"
+  
+  mariadb --version >> "$LOG_FILE" 2>&1
   if [[ $? != 127 ]]; then
+    log "WARN" "MariaDB is already installed"
 
     if [[ "${non_interactive}" == "false" ]]; then
-      status "It looks like mariadb is already installed\nShould it be removed or can we just reset the password?" "/"
-      export OPTIONS=("Reset MySQL/MariaDB password and proceed to install PHPMyAdmin" "Remove the MariaDB/MySQL server and every database" "Exit the script ")
+      status "MariaDB already installed"
+      echo -e "${yellow}${bold}ATTENTION :${reset} MariaDB/MySQL is already installed on this system."
+      echo -e "${blue}What do you want to do ?${reset}\n"
+      
+      export OPTIONS=(
+        "Reset MySQL/MariaDB password and continue phpMyAdmin installation" 
+        "Remove MariaDB/MySQL completely" 
+        "Quit the script"
+      )
 
       bashSelect
       case $? in
         0 )
-          status "resetting mysql password"
-          alreadyInstalled=true;
+          alreadyInstalled=true
+          log "INFO" "User chose to reset MySQL password"
+          echo -e "${green}Selected:${reset} Reset MySQL password"
         ;;
         1 )
           remove_db=true
-          ;;
+          log "INFO" "User chose to remove MariaDB completely"
+          echo -e "${green}Selected:${reset} Completely remove MariaDB"
+        ;;
         2 )
+          log "INFO" "User chose to exit"
+          echo -e "${yellow}Installation canceled by user.${reset}"
           exit 0
-          ;;
+        ;;
       esac
     elif [[ "${reset_password}" == "false" && "${remove_db}" == "false" ]]; then
-      echo -e "${red}Error:${reset} MySQL database is already installed. Use --remove_db to reinstall or --reset_password to reset the password."
+      log "ERROR" "MySQL database is already installed in non-interactive mode"
+      echo -e "${red}${bold}ERROR :${reset} MySQL database already installed. Use --remove_db to reinstall or --reset_password to reset the password."
       exit 1
     fi
-
   fi
 
   if [[ "${remove_db}" == "true" ]]; then
-    status "removing MariaDB/MySQL"
-    runCommand "service mariadb stop || service mysql stop || systemctl stop mariadb; DEBIAN_FRONTEND=noninteractiv apt -y remove --purge mariadb-*"
-    runCommand "rm -r /var/lib/mysql/"
+    status "Removing MariaDB/MySQL"
+    echo -e "${yellow}Completely removing MariaDB/MySQL...${reset}"
+    runCommand "service mariadb stop || service mysql stop || systemctl stop mariadb" "Stopping MariaDB service" 1 0
+    runCommand "DEBIAN_FRONTEND=noninteractive apt -y remove --purge mariadb-*" "Removing MariaDB packages" 1 1
+    runCommand "rm -rf /var/lib/mysql/" "Removing MySQL data" 1 0
+    log "SUCCESS" "MariaDB completely removed"
   fi
 
   if [[ -d /usr/share/phpmyadmin ]]; then
+    log "WARN" "phpMyAdmin directory already exists"
 
     if [[ "${non_interactive}" == "false" ]]; then
+      status "phpMyAdmin already present"
+      echo -e "${yellow}${bold}ATTENTION :${reset} The phpMyAdmin directory already exists."
+      echo -e "${blue}What do you want to do ?${reset}\n"
 
-      status "It looks like the phpmyadmin directory already exists" "/"
-      export OPTIONS=("Remove the /usr/share/phpmyadmin directory" "Exit the script ")
+      export OPTIONS=(
+        "Remove the existing phpMyAdmin directory" 
+        "Quit the script"
+      )
 
       bashSelect
       case $? in
         0 )
           remove_pma=true
-          ;;
+          log "INFO" "User chose to remove existing phpMyAdmin"
+          echo -e "${green}Selected:${reset} Remove existing phpMyAdmin"
+        ;;
         1 )
+          log "INFO" "User chose to exit due to existing phpMyAdmin"
+          echo -e "${yellow}Installation canceled by user.${reset}"
           exit 0
-          ;;
+        ;;
       esac
-
     fi
 
     if [[ "${remove_pma}" == "true" ]]; then
-      runCommand "rm -r /usr/share/phpmyadmin/" "removing /usr/share/phpmyadmin"
+      runCommand "rm -rf /usr/share/phpmyadmin/" "Removing existing phpMyAdmin directory" 1 1
     else
-      echo -e "${red}Error:${reset} phpmyadmin directory already exists. Use --remove_pma to remove the /usr/share/phpmyadmin directory."
+      log "ERROR" "phpMyAdmin directory exists in non-interactive mode"
+      echo -e "${red}${bold}ERROR :${reset} The phpMyAdmin directory already exists. Use --remove_pma to remove the phpMyAdmin directory."
       exit 1
     fi
-
   fi
 
-#I added this to collect some usage statistics.
-#Don't worry, no code will be downloaded or executed here (this is not possible with such a command).
-#Don't worry, we don't store any user-related data, IP addresses are anonymised, etc..
-#This command has no influence on the rest of the script, or on you, I only added it out of personal interest to know what kind of people use this script :)
-curl https://script.gransee.me/PHPMyAdminInstaller &
+  # Statistics collection (anonymized)
+  log "DEBUG" "Sending anonymous usage statistics"
+  curl https://script.gransee.me/PHPMyAdminInstaller &
 }
 
 function webserverInstall(){
@@ -330,100 +479,90 @@ function dbInstall(){
 
 function pmaInstall() {
 
-  echo -e "  ${yellow}➤ Downloading phpMyAdmin...${reset}"
-  runCommand "wget https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-languages.zip" "downloading PHPMyAdmin"
+  echo -e "  ${cyan}➤ Downloading phpMyAdmin...${reset}"
+  runCommand "wget https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-languages.zip" "Downloading phpMyAdmin" 1 1
 
-  echo -e "  ${yellow}➤ Extracting phpMyAdmin...${reset}"
-  runCommand "unzip phpMyAdmin-latest-all-languages.zip" "unpacking PHPMyAdmin"
+  echo -e "  ${cyan}➤ Extracting phpMyAdmin...${reset}"
+  runCommand "unzip phpMyAdmin-latest-all-languages.zip" "Extracting phpMyAdmin" 1 1
 
-  runCommand "rm phpMyAdmin-latest-all-languages.zip"
+  runCommand "rm phpMyAdmin-latest-all-languages.zip" "Removing downloaded archive" 1 0
 
-  echo -e "  ${yellow}➤ Installing phpMyAdmin files...${reset}"
-  runCommand "mv phpMyAdmin-* /usr/share/phpmyadmin" "moving files"
+  echo -e "  ${cyan}➤ Installing phpMyAdmin files...${reset}"
+  runCommand "mv phpMyAdmin-* /usr/share/phpmyadmin" "Moving phpMyAdmin files" 1 1
 
-  runCommand "mkdir -p /var/lib/phpmyadmin/tmp"
+  runCommand "mkdir -p /var/lib/phpmyadmin/tmp" "Creating temporary directory" 1 1
 
-  echo -e "  ${yellow}➤ Configuring phpMyAdmin...${reset}"
-  runCommand "cp /usr/share/phpmyadmin/config.sample.inc.php /usr/share/phpmyadmin/config.inc.php" "editing config"
+  echo -e "  ${cyan}➤ Configuring phpMyAdmin...${reset}"
+  runCommand "cp /usr/share/phpmyadmin/config.sample.inc.php /usr/share/phpmyadmin/config.inc.php" "Copying configuration file" 1 1
 
-  runCommand "sed -i 's/\$cfg\[\x27blowfish_secret\x27\] = \x27\x27\; \/\* YOU MUST FILL IN THIS FOR COOKIE AUTH! \*\//\$cfg\[\x27blowfish_secret\x27\] = \x27'${blowfish_secret}'\x27\; \/\* YOU MUST FILL IN THIS FOR COOKIE AUTH! \*\//' /usr/share/phpmyadmin/config.inc.php"
+  # Configuration of phpMyAdmin settings
+  log "INFO" "Configuring phpMyAdmin settings"
+  runCommand "sed -i 's/\$cfg\[\x27blowfish_secret\x27\] = \x27\x27\; \/\* YOU MUST FILL IN THIS FOR COOKIE AUTH! \*\//\$cfg\[\x27blowfish_secret\x27\] = \x27'${blowfish_secret}'\x27\; \/\* YOU MUST FILL IN THIS FOR COOKIE AUTH! \*\//' /usr/share/phpmyadmin/config.inc.php" "Configuring blowfish secret" 1 1
 
-  runCommand "sed -i 's/\/\/ \$cfg\[\x27Servers\x27\]\[\$i\]\[\x27controluser\x27\] \= \x27pma\x27\;/\$cfg\[\x27Servers\x27\]\[\$i\]\[\x27controluser\x27\] \= \x27pma\x27\;/' /usr/share/phpmyadmin/config.inc.php"
+  # Configuration of phpMyAdmin control tables
+  local config_commands=(
+    "sed -i 's/\/\/ \$cfg\[\x27Servers\x27\]\[\$i\]\[\x27controluser\x27\] \= \x27pma\x27\;/\$cfg\[\x27Servers\x27\]\[\$i\]\[\x27controluser\x27\] \= \x27pma\x27\;/' /usr/share/phpmyadmin/config.inc.php"
+    "sed -i 's/\/\/ \$cfg\[\x27Servers\x27\]\[\$i\]\[\x27controlpass\x27\] = \x27pmapass\x27\;/\$cfg\[\x27Servers\x27\]\[\$i\]\[\x27controlpass\x27\] = \x27'${pmaPassword}'\x27\;/' /usr/share/phpmyadmin/config.inc.php"
+    "sed -i 's/\/\/ \$cfg\[\x27Servers\x27\]\[\$i\]\[\x27pmadb\x27\] \= \x27phpmyadmin\x27\;/\$cfg\[\x27Servers\x27\]\[\$i\]\[\x27pmadb\x27\] \= \x27phpmyadmin\x27\;/' /usr/share/phpmyadmin/config.inc.php"
+  )
+  
+  for cmd in "${config_commands[@]}"; do
+    eval "$cmd" >> "$LOG_FILE" 2>&1
+  done
 
-  runCommand "sed -i 's/\/\/ \$cfg\[\x27Servers\x27\]\[\$i\]\[\x27controlpass\x27\] = \x27pmapass\x27\;/\$cfg\[\x27Servers\x27\]\[\$i\]\[\x27controlpass\x27\] = \x27'${pmaPassword}'\x27\;/' /usr/share/phpmyadmin/config.inc.php"
-
-  runCommand "sed -i 's/\/\/ \$cfg\[\x27Servers\x27\]\[\$i\]\[\x27pmadb\x27\] \= \x27phpmyadmin\x27\;/\$cfg\[\x27Servers\x27\]\[\$i\]\[\x27pmadb\x27\] \= \x27phpmyadmin\x27\;/' /usr/share/phpmyadmin/config.inc.php"
-
-  runCommand "sed -i 's/\/\/ \$cfg\[\x27Servers\x27\]\[\$i\]\[\x27bookmarktable\x27\] \= \x27pma__bookmark\x27\;/\$cfg\[\x27Servers\x27\]\[\$i\]\[\x27bookmarktable\x27\] \= \x27pma__bookmark\x27\;/' /usr/share/phpmyadmin/config.inc.php"
-
-  runCommand "sed -i 's/\/\/ \$cfg\[\x27Servers\x27\]\[\$i\]\[\x27relation\x27\] \= \x27pma__relation\x27\;/\$cfg\[\x27Servers\x27\]\[\$i\]\[\x27relation\x27\] \= \x27pma__relation\x27\;/' /usr/share/phpmyadmin/config.inc.php"
-
-  runCommand "sed -i 's/\/\/ \$cfg\[\x27Servers\x27\]\[\$i\]\[\x27table_info\x27\] \= \x27pma__table_info\x27\;/\$cfg\[\x27Servers\x27\]\[\$i\]\[\x27table_info\x27\] \= \x27pma__table_info\x27\;/' /usr/share/phpmyadmin/config.inc.php"
-
-  runCommand "sed -i 's/\/\/ \$cfg\[\x27Servers\x27\]\[\$i\]\[\x27table_coords\x27\] \= \x27pma__table_coords\x27\;/\$cfg\[\x27Servers\x27\]\[\$i\]\[\x27table_coords\x27\] \= \x27pma__table_coords\x27\;/' /usr/share/phpmyadmin/config.inc.php"
-
-  runCommand "sed -i 's/\/\/ \$cfg\[\x27Servers\x27\]\[\$i\]\[\x27pdf_pages\x27\] \= \x27pma__pdf_pages\x27\;/\$cfg\[\x27Servers\x27\]\[\$i\]\[\x27pdf_pages\x27\] \= \x27pma__pdf_pages\x27\;/' /usr/share/phpmyadmin/config.inc.php"
-
-  runCommand "sed -i 's/\/\/ \$cfg\[\x27Servers\x27\]\[\$i\]\[\x27column_info\x27\] \= \x27pma__column_info\x27\;/\$cfg\[\x27Servers\x27\]\[\$i\]\[\x27column_info\x27\] \= \x27pma__column_info\x27\;/' /usr/share/phpmyadmin/config.inc.php"
-
-  runCommand "sed -i 's/\/\/ \$cfg\[\x27Servers\x27\]\[\$i\]\[\x27history\x27\] \= \x27pma__history\x27\;/\$cfg\[\x27Servers\x27\]\[\$i\]\[\x27history\x27\] \= \x27pma__history\x27\;/' /usr/share/phpmyadmin/config.inc.php"
-
-  runCommand "sed -i 's/\/\/ \$cfg\[\x27Servers\x27\]\[\$i\]\[\x27table_uiprefs\x27\] \= \x27pma__table_uiprefs\x27\;/\$cfg\[\x27Servers\x27\]\[\$i\]\[\x27table_uiprefs\x27\] \= \x27pma__table_uiprefs\x27\;/' /usr/share/phpmyadmin/config.inc.php"
-
-  runCommand "sed -i 's/\/\/ \$cfg\[\x27Servers\x27\]\[\$i\]\[\x27tracking\x27\] \= \x27pma__tracking\x27\;/\$cfg\[\x27Servers\x27\]\[\$i\]\[\x27tracking\x27\] \= \x27pma__tracking\x27\;/' /usr/share/phpmyadmin/config.inc.php"
-
-  runCommand "sed -i 's/\/\/ \$cfg\[\x27Servers\x27\]\[\$i\]\[\x27userconfig\x27\] \= \x27pma__userconfig\x27\;/\$cfg\[\x27Servers\x27\]\[\$i\]\[\x27userconfig\x27\] \= \x27pma__userconfig\x27\;/' /usr/share/phpmyadmin/config.inc.php"
-
-  runCommand "sed -i 's/\/\/ \$cfg\[\x27Servers\x27\]\[\$i\]\[\x27recent\x27\] \= \x27pma__recent\x27\;/\$cfg\[\x27Servers\x27\]\[\$i\]\[\x27recent\x27\] \= \x27pma__recent\x27\;/' /usr/share/phpmyadmin/config.inc.php"
-
-  runCommand "sed -i 's/\/\/ \$cfg\[\x27Servers\x27\]\[\$i\]\[\x27favorite\x27\] \= \x27pma__favorite\x27\;/\$cfg\[\x27Servers\x27\]\[\$i\]\[\x27favorite\x27\] \= \x27pma__favorite\x27\;/' /usr/share/phpmyadmin/config.inc.php"
-
-  runCommand "sed -i 's/\/\/ \$cfg\[\x27Servers\x27\]\[\$i\]\[\x27users\x27\] \= \x27pma__users\x27\;/\$cfg\[\x27Servers\x27\]\[\$i\]\[\x27users\x27\] \= \x27pma__users\x27\;/' /usr/share/phpmyadmin/config.inc.php"
-
-  runCommand "sed -i 's/\/\/ \$cfg\[\x27Servers\x27\]\[\$i\]\[\x27usergroups\x27\] \= \x27pma__usergroups\x27\;/\$cfg\[\x27Servers\x27\]\[\$i\]\[\x27usergroups\x27\] \= \x27pma__usergroups\x27\;/' /usr/share/phpmyadmin/config.inc.php"
-
-  runCommand "sed -i 's/\/\/ \$cfg\[\x27Servers\x27\]\[\$i\]\[\x27navigationhiding\x27\] \= \x27pma__navigationhiding\x27\;/\$cfg\[\x27Servers\x27\]\[\$i\]\[\x27navigationhiding\x27\] \= \x27pma__navigationhiding\x27\;/' /usr/share/phpmyadmin/config.inc.php"
-
-  runCommand "sed -i 's/\/\/ \$cfg\[\x27Servers\x27\]\[\$i\]\[\x27savedsearches\x27\] \= \x27pma__savedsearches\x27\;/\$cfg\[\x27Servers\x27\]\[\$i\]\[\x27savedsearches\x27\] \= \x27pma__savedsearches\x27\;/' /usr/share/phpmyadmin/config.inc.php"
-
-  runCommand "sed -i 's/\/\/ \$cfg\[\x27Servers\x27\]\[\$i\]\[\x27central_columns\x27\] \= \x27pma__central_columns\x27\;/\$cfg\[\x27Servers\x27\]\[\$i\]\[\x27central_columns\x27\] \= \x27pma__central_columns\x27\;/' /usr/share/phpmyadmin/config.inc.php"
-
-  runCommand "sed -i 's/\/\/ \$cfg\[\x27Servers\x27\]\[\$i\]\[\x27designer_settings\x27\] \= \x27pma__designer_settings\x27\;/\$cfg\[\x27Servers\x27\]\[\$i\]\[\x27designer_settings\x27\] \= \x27pma__designer_settings\x27\;/' /usr/share/phpmyadmin/config.inc.php"
-
-  runCommand "sed -i 's/\/\/ \$cfg\[\x27Servers\x27\]\[\$i\]\[\x27export_templates\x27\] \= \x27pma__export_templates\x27\;/\$cfg\[\x27Servers\x27\]\[\$i\]\[\x27export_templates\x27\] \= \x27pma__export_templates\x27\;/' /usr/share/phpmyadmin/config.inc.php"
+  # Configuration of phpMyAdmin tables (continued)
+  local table_configs=(
+    "bookmarktable" "relation" "table_info" "table_coords" "pdf_pages" 
+    "column_info" "history" "table_uiprefs" "tracking" "userconfig" 
+    "recent" "favorite" "users" "usergroups" "navigationhiding" 
+    "savedsearches" "central_columns" "designer_settings" "export_templates"
+  )
+  
+  for table in "${table_configs[@]}"; do
+    sed -i "s/\/\/ \$cfg\[\x27Servers\x27\]\[\$i\]\[\x27${table}\x27\] \= \x27pma__${table}\x27\;/\$cfg\[\x27Servers\x27\]\[\$i\]\[\x27${table}\x27\] \= \x27pma__${table}\x27\;/" /usr/share/phpmyadmin/config.inc.php >> "$LOG_FILE" 2>&1
+  done
 
   if [[ "${rootLogin}" == "n" ]]; then
-
-  runCommand "echo \"\\\$cfg['Servers'][\\\$i]['export_templates'] = false;\" >> /usr/share/phpmyadmin/config.inc.php"
-
+    runCommand "echo \"\\\$cfg['Servers'][\\\$i]['export_templates'] = false;\" >> /usr/share/phpmyadmin/config.inc.php" "Disabling root access" 1 1
   fi
 
-  runCommand "printf \"\\\$cfg[\'TempDir\'] = \'/var/lib/phpmyadmin/tmp\';\" >> /usr/share/phpmyadmin/config.inc.php"
+  runCommand "printf \"\\\$cfg[\'TempDir\'] = \'/var/lib/phpmyadmin/tmp\';\" >> /usr/share/phpmyadmin/config.inc.php" "Configuring temporary directory" 1 1
 
-  echo -e "  ${yellow}➤ Setting up permissions...${reset}"
-  runCommand "chown -R www-data:www-data /var/lib/phpmyadmin" "rights are granted"
+  echo -e "  ${cyan}➤ Configuring permissions...${reset}"
+  runCommand "chown -R www-data:www-data /var/lib/phpmyadmin" "Setting permissions" 1 1
 
-  echo -e "  ${yellow}➤ Creating phpMyAdmin database tables...${reset}"
-  runCommand "service mariadb start || service mysql start || systemctl start mariadb" "importing PHPMyAdmin's \"creating_tables.sql\""
+  echo -e "  ${cyan}➤ Creating phpMyAdmin database tables...${reset}"
+  runCommand "service mariadb start || service mysql start || systemctl start mariadb" "Starting MariaDB service" 1 1
 
-  runCommand "mariadb -u root -p${rootPasswordMariaDB} < /usr/share/phpmyadmin/sql/create_tables.sql"
+  runCommand "mariadb -u root -p${rootPasswordMariaDB} < /usr/share/phpmyadmin/sql/create_tables.sql" "Importing phpMyAdmin tables" 1 1
+  
+  # Create phpMyAdmin control user after tables are created
+  echo -e "  ${cyan}➤ Creating phpMyAdmin control user...${reset}"
+  runCommand "mariadb -u root -p${rootPasswordMariaDB} -e \"CREATE USER IF NOT EXISTS 'pma'@'localhost' IDENTIFIED BY '${pmaPassword}';\"" "Creating phpMyAdmin control user" 1 1
+  runCommand "mariadb -u root -p${rootPasswordMariaDB} -e \"GRANT SELECT, INSERT, UPDATE, DELETE ON phpmyadmin.* TO 'pma'@'localhost';\"" "Granting privileges to phpMyAdmin control user" 1 1
+  runCommand "mariadb -u root -p${rootPasswordMariaDB} -e \"FLUSH PRIVILEGES;\"" "Flushing privileges" 1 1
 }
 
 function mainPart() {
 
-  runCommand "ls /etc/apt/sources.list.d/php* >/dev/null 2>&1 && rm /etc/apt/sources.list.d/php* || echo 0"
+  runCommand "ls /etc/apt/sources.list.d/php* >/dev/null 2>&1 && rm /etc/apt/sources.list.d/php* || echo 0" "Cleaning up old PHP repositories" 1 0
 
-  echo -e "\n${green}=== Database Installation Progress ===${reset}"
+  echo -e "\n${cyan}╔═══════════════════════════════════════════════════════════════════════════════╗${reset}"
+  echo -e "${cyan}║ ${bold}${green}                    MARIADB & PHPMYADMIN INSTALLATION                    ${reset}${cyan}║${reset}"
+  echo -e "${cyan}║ ${reset}${blue}                          Version: $script_version                           ${reset}${cyan}║${reset}"
+  echo -e "${cyan}╚═══════════════════════════════════════════════════════════════════════════════╝${reset}\n"
+
+  echo -e "${green}=== Database Installation Progress ===${reset}"
   echo -e "${blue}Step 1/8: Updating system packages...${reset}"
-  runCommand "apt -y update" "updating package lists"
+  runCommand "apt -y update" "Updating package list" 1 1
 
   echo -e "${blue}Step 2/8: Upgrading system packages...${reset}"
-  runCommand "apt -y upgrade"
+  runCommand "apt -y upgrade" "Upgrading system packages" 1 1
 
   # Add MariaDB 11.4 repository for latest version
   echo -e "${blue}Step 3/8: Setting up MariaDB 11.4 repository...${reset}"
   status "Adding MariaDB 11.4 repository"
-  runCommand "apt install -y apt-transport-https curl gnupg lsb-release"
+  runCommand "apt install -y apt-transport-https curl gnupg lsb-release" "Installing repository tools" 1 1
   
   # Detect distribution and set appropriate repository
   eval $( cat /etc/*release* )
@@ -437,23 +576,25 @@ function mainPart() {
   else
     # Fallback to Ubuntu jammy for unknown distributions
     MARIADB_REPO="deb https://deb.mariadb.org/11.4/ubuntu jammy main"
-    status "Unknown distribution detected, using Ubuntu jammy repository"
+    log "WARN" "Unknown distribution detected, using Ubuntu jammy repository"
+    echo -e "${yellow}Unknown distribution detected, using Ubuntu jammy repository${reset}"
   fi
   
-  status "Adding MariaDB repository for $DISTRO $CODENAME"
-  runCommand "curl -o /etc/apt/trusted.gpg.d/mariadb_release_signing_key.asc 'https://mariadb.org/mariadb_release_signing_key.asc'"
-  runCommand "sh -c \"echo '$MARIADB_REPO' > /etc/apt/sources.list.d/mariadb.list\""
+  log "INFO" "Adding MariaDB repository for $DISTRO $CODENAME"
+  echo -e "${blue}Adding MariaDB repository for $DISTRO $CODENAME${reset}"
+  runCommand "curl -o /etc/apt/trusted.gpg.d/mariadb_release_signing_key.asc 'https://mariadb.org/mariadb_release_signing_key.asc'" "Downloading MariaDB GPG key" 1 1
+  runCommand "sh -c \"echo '$MARIADB_REPO' > /etc/apt/sources.list.d/mariadb.list\"" "Configuring MariaDB repository" 1 1
   
   # Update package list with new repository
   echo -e "${blue}Step 4/8: Updating package lists with MariaDB repository...${reset}"
-  runCommand "apt -y update"
+  runCommand "apt -y update" "Updating with new repository" 1 1
 
   echo -e "${blue}Step 5/8: Installing Apache2, MariaDB 11.4, and required packages...${reset}"
   echo -e "${yellow}This step may take several minutes depending on your internet connection...${reset}"
-  runCommand "apt install -y apache2 mariadb-server=1:11.4* mariadb-client=1:11.4* pwgen expect iproute2 wget zip apt-transport-https lsb-release ca-certificates curl dialog" "installing necessary packages with MariaDB 11.4"
+  runCommand "apt install -y apache2 mariadb-server=1:11.4* mariadb-client=1:11.4* pwgen expect iproute2 wget zip apt-transport-https lsb-release ca-certificates curl dialog" "Installing necessary packages with MariaDB 11.4" 1 1
 
   echo -e "${blue}Step 6/8: Starting MariaDB service...${reset}"
-  runCommand "service mariadb start || service mysql start || systemctl start mariadb"
+  runCommand "service mariadb start || service mysql start || systemctl start mariadb" "Starting MariaDB service" 1 1
 
   echo -e "${blue}Step 7/8: Configuring MariaDB security and phpMyAdmin...${reset}"
   dbInstall
@@ -461,16 +602,14 @@ function mainPart() {
   pmaInstall
 
   echo -e "${blue}Step 8/8: Finalizing installation...${reset}"
-  runCommand "service mariadb restart || service mysql restart || systemctl restart mariadb"
-
-  runCommand "mariadb -u root -p${rootPasswordMariaDB} -e \"GRANT SELECT, INSERT, UPDATE, DELETE ON phpmyadmin.* TO 'pma'@'localhost' IDENTIFIED BY '${pmaPassword}'\"" "creating MySQL users and granting privileges"
+  runCommand "service mariadb restart || service mysql restart || systemctl restart mariadb" "Restarting MariaDB service" 1 1
 
   if [[ "${rootLogin}" == "n" ]]; then
-
-  runCommand "mariadb -u root -p${rootPasswordMariaDB} -e \"GRANT ALL PRIVILEGES ON \$( printf '\52' ).\$( printf '\52' ) TO '${dynuser}'@'localhost' IDENTIFIED BY '${dynamicUserPassword}' WITH GRANT OPTION;\""
-
+    echo -e "  ${cyan}➤ Creating dedicated database user...${reset}"
+    runCommand "mariadb -u root -p${rootPasswordMariaDB} -e \"CREATE USER IF NOT EXISTS '${dynuser}'@'localhost' IDENTIFIED BY '${dynamicUserPassword}';\"" "Creating dedicated database user" 1 1
+    runCommand "mariadb -u root -p${rootPasswordMariaDB} -e \"GRANT ALL PRIVILEGES ON *.* TO '${dynuser}'@'localhost' WITH GRANT OPTION;\"" "Granting privileges to dedicated user" 1 1
+    runCommand "mariadb -u root -p${rootPasswordMariaDB} -e \"FLUSH PRIVILEGES;\"" "Flushing privileges" 1 1
   fi
-
 
   webserverInstall
 
@@ -516,6 +655,11 @@ function selfTest() {
 function output() {
   clear
 
+  echo -e "\n${cyan}╔═══════════════════════════════════════════════════════════════════════════════╗${reset}"
+  echo -e "${cyan}║ ${bold}${green}                    INSTALLATION COMPLETED SUCCESSFULLY                  ${reset}${cyan}║${reset}"
+  echo -e "${cyan}║ ${reset}${blue}                        MariaDB 11.4 & phpMyAdmin                        ${reset}${cyan}║${reset}"
+  echo -e "${cyan}╚═══════════════════════════════════════════════════════════════════════════════╝${reset}\n"
+
   if [[ $saveOutput == "true" ]]; then
     echo "
     MariaDB-Data:
@@ -533,44 +677,67 @@ function output() {
       else
       echo "Link: http://${ipaddress}/phpmyadmin/ " > /root/.PHPma
       fi
-      printf "\nOutput saved in /root/.mariadbPhpma, /root/.PHPma and /root/.mariadbRoot"
+      log "INFO" "Output saved in /root/.mariadbPhpma, /root/.PHPma and /root/.mariadbRoot"
+      echo -e "${green}✓ Information saved in /root/.mariadbPhpma, /root/.PHPma and /root/.mariadbRoot${reset}"
   fi
 
-  printf "\nSave the following:\n\n"
-  echo "
-  MariaDB-Data:
-     IP/Host: localhost
-     Port: 3306
-     User: root
-     Password: ${rootPasswordMariaDB}"
+  echo -e "${bold}${yellow}CONNECTION INFORMATION${reset}"
+  echo -e "${blue}Please save these important connection information:${reset}\n"
+  
+  echo -e "${bold}${green}▶ MARIADB/MYSQL${reset}"
+  echo -e "${blue}  • Host/IP :${reset} ${bold}localhost${reset}"
+  echo -e "${blue}  • Port :${reset} ${bold}3306${reset}"
+  echo -e "${blue}  • User :${reset} ${bold}root${reset}"
+  echo -e "${blue}  • Password :${reset} ${bold}${rootPasswordMariaDB}${reset}"
 
    if [[ "${rootLogin}" == "n" ]]; then
-   echo "
-  PHPMyAdmin-Data:
-     Link: http://${ipaddress}/phpmyadmin/
-     User: ${dynuser}
-     Password: ${dynamicUserPassword}
-     "
+   echo -e "\n${bold}${green}▶ PHPMYADMIN${reset}"
+   echo -e "${blue}  • Access Link :${reset} ${bold}http://${ipaddress}/phpmyadmin/${reset}"
+   echo -e "${blue}  • User :${reset} ${bold}${dynuser}${reset}"
+   echo -e "${blue}  • Password :${reset} ${bold}${dynamicUserPassword}${reset}"
   else
-  echo "
-      Link: http://${ipaddress}/phpmyadmin/"
+  echo -e "\n${bold}${green}▶ PHPMYADMIN${reset}"
+  echo -e "${blue}  • Access Link :${reset} ${bold}http://${ipaddress}/phpmyadmin/${reset}"
+  echo -e "${blue}  • User :${reset} ${bold}root${reset}"
+  echo -e "${blue}  • Password :${reset} ${bold}${rootPasswordMariaDB}${reset}"
   fi
+
+  echo -e "\n${bold}${yellow}SYSTEM INFORMATION${reset}"
+  echo -e "${blue}  • MariaDB Version :${reset} ${bold}11.4${reset}"
+  echo -e "${blue}  • Web Server :${reset} ${bold}Apache2${reset}"
+  echo -e "${blue}  • Log File :${reset} ${bold}${LOG_FILE}${reset}"
+
+  echo -e "\n${bold}${cyan}NEXT STEPS${reset}"
+  echo -e "${blue}1. Access phpMyAdmin via your web browser${reset}"
+  echo -e "${blue}2. Login with the credentials above${reset}"
+  echo -e "${blue}3. Create your databases for your applications${reset}"
+
+  echo -e "\n${green}${bold}✓ MariaDB 11.4 and phpMyAdmin installation completed successfully!${reset}"
+  echo -e "${yellow}Thank you for using Dolyyyy's phpMyAdmin installer${reset}\n"
+
+  log "SUCCESS" "phpMyAdmin installation completed successfully"
 }
 
 
 
 if [[ $EUID -ne 0 ]]; then
-   echo "This script must be run as root" 1>&2
+   echo -e "${red}${bold}ERROR:${reset} This script must be run as root"
    exit 1
 fi
+
+# Display welcome banner
+echo -e "\n${cyan}╔═══════════════════════════════════════════════════════════════════════════════╗${reset}"
+echo -e "${cyan}║ ${bold}${green}                    MARIADB & PHPMYADMIN INSTALLER                      ${reset}${cyan}║${reset}"
+echo -e "${cyan}║ ${reset}${blue}                          Version: $script_version                           ${reset}${cyan}║${reset}"
+echo -e "${cyan}║ ${reset}${yellow}            https://github.com/Dolyyyy/fiveminstaller                 ${reset}${cyan}║${reset}"
+echo -e "${cyan}╚═══════════════════════════════════════════════════════════════════════════════╝${reset}\n"
+
+log "INFO" "Starting phpMyAdmin Installer v$script_version"
 
 while [[ "$#" -gt 0 ]]; do
     case $1 in
     -h|--help)
-      echo "This is just a simple script to install PHPMyAdmin, Apache2 and MariaDB on Debian based systems."
-      echo
-      echo "Syntax: bash <(curl -s https://raw.githubusercontent.com/JulianGransee/PHPMyAdminInstaller/main/install.sh) [options]"
-      echo
+      echo -e "${bold}Usage: bash <(curl -s https://raw.githubusercontent.com/Dolyyyy/fiveminstaller/refs/heads/main/phpmyadmin.sh) [OPTIONS]${reset}"
       echo "Options:"
       echo "  -h, --help                      Display this help message."
       echo "  -s, --save                      Save the output to /root/.mariadbPhpma.output."
@@ -589,7 +756,7 @@ while [[ "$#" -gt 0 ]]; do
       exit
       ;;
     -s|--save)
-      status "The output is written to a file"
+      log "INFO" "Output will be saved to file"
       saveOutput=true
       shift
       ;;
@@ -607,7 +774,7 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --db_user)
       if [[ -z "$2" ]]; then
-        echo "Error: --db_user requires an argument."
+        echo -e "${red}Error:${reset} --db_user requires an argument."
         exit 1
       fi
       db_user="$2"
@@ -616,7 +783,7 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --db_password)
       if [[ -z "$2" ]]; then
-        echo "Error: --db_password requires an argument."
+        echo -e "${red}Error:${reset} --db_password requires an argument."
         exit 1
       fi
       db_password="$2"
@@ -641,7 +808,7 @@ while [[ "$#" -gt 0 ]]; do
       shift
       ;;
     *)
-      echo "Unknown option: $1"
+      echo -e "${red}Unknown option:${reset} $1"
       exit 1
       ;;
   esac
@@ -673,9 +840,13 @@ if [[ "${non_interactive}" == "true" ]]; then
   fi
 fi
 
-curl --version
-if [[ $? == 127  ]]; then  apt update -y && apt -y install curl; fi
+# Check for curl
+if ! command -v curl &> /dev/null; then
+    log "WARN" "curl is not installed, installing now..."
+    apt update -y && apt -y install curl
+fi
 
+log "INFO" "Sourcing BashSelect script"
 source <(curl -s https://raw.githubusercontent.com/Dolyyyy/fiveminstaller/refs/heads/main/bashselect.sh)
 
 input
