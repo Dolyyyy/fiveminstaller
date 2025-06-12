@@ -1313,18 +1313,15 @@ EOF
                     rm /root/.mariadbRoot
                 fi
                 
-                # Create FiveM database and user
-                fivempasswd=$( pwgen 32 1 );
+                # Create FiveM database with root user access
                 if [ -n "$rootPasswordMariaDB" ]; then
                     mariadb -u root -p$rootPasswordMariaDB -e "CREATE DATABASE IF NOT EXISTS fivem;"
-                    mariadb -u root -p$rootPasswordMariaDB -e "GRANT ALL PRIVILEGES ON fivem.* TO 'fivem'@'localhost' IDENTIFIED BY '${fivempasswd}';"
-                    mariadb -u root -p$rootPasswordMariaDB -e "FLUSH PRIVILEGES;"
                     
                     echo -e "${blue}Database Name:${reset} ${bold}fivem${reset}"
-                    echo -e "${blue}Database User:${reset} ${bold}fivem${reset}"
-                    echo -e "${blue}Database Password:${reset} ${bold}${fivempasswd}${reset}"
+                    echo -e "${blue}Database User:${reset} ${bold}root${reset}"
+                    echo -e "${blue}Database Password:${reset} ${bold}${rootPasswordMariaDB}${reset}"
                     echo -e "${blue}MySQL Connection String:${reset}"
-                    echo -e "${bold}set mysql_connection_string \"server=127.0.0.1;database=fivem;userid=fivem;password=${fivempasswd}\"${reset}"
+                    echo -e "${bold}set mysql_connection_string \"server=127.0.0.1;database=fivem;userid=root;password=${rootPasswordMariaDB}\"${reset}"
                     
                     if [ -f "/root/.PHPma" ]; then
                         runCommand "cat /root/.PHPma" "Reading phpMyAdmin information" 1 0
@@ -1412,10 +1409,10 @@ EOF
 ▶ DATABASE INFORMATION
   • Database Type: MariaDB/MySQL (Installed with this script)
   • Database Name: fivem
-  • Database User: fivem
-  • Database Password: ${fivempasswd}
+  • Database User: root
+  • Database Password: ${rootPasswordMariaDB}
   • MySQL Connection String:
-    set mysql_connection_string "server=127.0.0.1;database=fivem;userid=fivem;password=${fivempasswd}"
+    set mysql_connection_string "server=127.0.0.1;database=fivem;userid=root;password=${rootPasswordMariaDB}"
   • phpMyAdmin: http://$(ip route get 1.1.1.1 | awk '{print $7; exit}')/phpmyadmin
 
 EOF
