@@ -20,6 +20,35 @@ LATEST_LOG_SYMLINK="${LOG_DIR}/latest.log"
 # Global variables
 dir=""
 default_dir=""
+
+# Function to determine default installation directory
+get_default_install_dir() {
+    # Try to find a suitable user directory
+    if [[ -n "$SUDO_USER" ]] && [[ "$SUDO_USER" != "root" ]]; then
+        # Script run with sudo, use the original user
+        default_dir="/home/$SUDO_USER/FiveM"
+        log "INFO" "Using sudo user directory: $default_dir"
+    elif [[ -d "/home" ]]; then
+        # Look for existing users in /home (excluding system users and FiveM)
+        local users=($(ls /home 2>/dev/null | grep -v "lost+found" | grep -v "FiveM"))
+        if [[ ${#users[@]} -gt 0 ]]; then
+            # Use the first non-system user found
+            for user in "${users[@]}"; do
+                if [[ -d "/home/$user" ]] && [[ "$user" != "root" ]]; then
+                    default_dir="/home/$user/FiveM"
+                    log "INFO" "Using existing user directory: $default_dir"
+                    break
+                fi
+            done
+        fi
+    fi
+    
+    # Fallback to /home/FiveM if no suitable user found
+    if [[ -z "$default_dir" ]]; then
+        default_dir="/home/FiveM"
+        log "INFO" "Using fallback directory: $default_dir"
+    fi
+}
 update_artifacts=false
 non_interactive=false
 artifacts_version=0
@@ -37,6 +66,11 @@ existing_db_name=""
 existing_db_user=""
 existing_db_password=""
 existing_db_configured=false
+
+# MariaDB/phpMyAdmin variables
+rootPasswordMariaDB=""
+pmaPassword=""
+blowfish_secret=""
 
 # Setup logging directory
 setup_logging() {
@@ -100,70 +134,6 @@ log() {
     fi
 }
 
-# System information gathering
-gather_system_info() {
-    log "DEBUG" "Gathering system information"
-    
-    SYS_OS=$(cat /etc/os-release 2>/dev/null | grep "PRETTY_NAME" | cut -d'"' -f2 || echo "Unknown OS")
-    SYS_KERNEL=$(uname -r 2>/dev/null || echo "Unknown kernel")
-    SYS_CPU=$(grep "model name" /proc/cpuinfo 2>/dev/null | head -n1 | cut -d':' -f2 | xargs || echo "Unknown CPU")
-    SYS_CPU_CORES=$(grep -c ^processor /proc/cpuinfo 2>/dev/null || echo "Unknown")
-    SYS_MEM_TOTAL=$(free -h 2>/dev/null | grep "Mem:" | awk '{print $2}' || echo "Unknown")
-    SYS_MEM_FREE=$(free -h 2>/dev/null | grep "Mem:" | awk '{print $4}' || echo "Unknown")
-    SYS_DISK_TOTAL=$(df -h / 2>/dev/null | grep -v "Filesystem" | awk '{print $2}' || echo "Unknown")
-    SYS_DISK_FREE=$(df -h / 2>/dev/null | grep -v "Filesystem" | awk '{print $4}' || echo "Unknown")
-    SYS_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}' || echo "Unknown")
-
-    log "INFO" "System Information:"
-    log "INFO" "  OS: $SYS_OS"
-    log "INFO" "  Kernel: $SYS_KERNEL"
-    log "INFO" "  CPU: $SYS_CPU ($SYS_CPU_CORES cores)"
-    log "INFO" "  Memory: $SYS_MEM_FREE free of $SYS_MEM_TOTAL total"
-    log "INFO" "  Disk space: $SYS_DISK_FREE free of $SYS_DISK_TOTAL total"
-    log "INFO" "  IP Address: $SYS_IP"
-    
-    # Check system requirements
-    if [ "$SYS_CPU_CORES" -lt 2 ]; then
-        log "WARN" "Less than 2 CPU cores detected. FiveM server might perform poorly."
-    fi
-    
-    # Extract memory in MB for comparison
-    SYS_MEM_MB=$(free -m | grep "Mem:" | awk '{print $2}')
-    if [ "$SYS_MEM_MB" -lt 4096 ]; then
-        log "WARN" "Less than 4GB RAM detected. FiveM server might perform poorly."
-        if [ "$SYS_MEM_MB" -lt 2048 ]; then
-            log "ERROR" "Less than 2GB RAM detected. FiveM server requires at least 2GB RAM."
-            if [ "${non_interactive}" == "false" ]; then
-                echo -e "${red}${bold}WARNING:${reset} Your system has less than 2GB RAM, which is below the minimum requirements for a FiveM server."
-                read -p "Do you want to continue anyway? (y/N): " -n 1 -r
-                echo
-                if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                    log "INFO" "Installation aborted by user due to insufficient RAM"
-                    exit 1
-                fi
-            fi
-        fi
-    fi
-    
-    # Check disk space
-    SYS_DISK_MB=$(df -m / | grep -v "Filesystem" | awk '{print $4}')
-    if [ "$SYS_DISK_MB" -lt 4096 ]; then
-        log "WARN" "Less than 4GB free disk space. FiveM server requires at least 4GB free space."
-        if [ "$SYS_DISK_MB" -lt 2048 ]; then
-            log "ERROR" "Less than 2GB free disk space. Installation might fail."
-            if [ "${non_interactive}" == "false" ]; then
-                echo -e "${red}${bold}WARNING:${reset} Your system has less than 2GB free disk space, which may not be enough for a FiveM server."
-                read -p "Do you want to continue anyway? (y/N): " -n 1 -r
-                echo
-                if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                    log "INFO" "Installation aborted by user due to insufficient disk space"
-                    exit 1
-                fi
-            fi
-        fi
-    fi
-}
-
 # Check that the script is run as root
 if [ "$EUID" -ne 0 ]; then
     echo -e "${red}${bold}ERROR:${reset} This script must be run as root"
@@ -173,22 +143,75 @@ fi
 # Initialize logging before doing anything else
 setup_logging
 
+# Function to show status in a nice box (non-interactive)
 status(){
-  clear
-  echo -e "${cyan}╔════════════════════════════════════════════════════════════════════════════╗${reset}"
-  echo -e "${cyan}║                                                                            ║${reset}"
-  echo -e "${cyan}║${reset}  ${bold}${green} $@ ${reset}${cyan}  ║${reset}"
-  echo -e "${cyan}║                                                                            ║${reset}"
-  echo -e "${cyan}╚════════════════════════════════════════════════════════════════════════════╝${reset}"
-  log "INFO" "$@..."
-  sleep 1
+  if [[ "${non_interactive}" == "false" ]]; then
+    clear
+    echo -e "${cyan}╔════════════════════════════════════════════════════════════════════════════╗${reset}"
+    echo -e "${cyan}║                                                                            ║${reset}"
+    echo -e "${cyan}║${reset}  ${bold}${green} $@ ${reset}${cyan}  ║${reset}"
+    echo -e "${cyan}║                                                                            ║${reset}"
+    echo -e "${cyan}╚════════════════════════════════════════════════════════════════════════════╝${reset}"
+    log "INFO" "$@..."
+    sleep 1
+  else
+    echo -e "${green}${@}...${reset}"
+    log "INFO" "${@}..."
+    sleep 0.2
+  fi
 }
 
+# Function to show loading animation
+show_loading() {
+    local message="$1"
+    local pid="$2"
+    local delay=0.3
+    local spinstr='|/-\'
+    local count=0
+    
+    while kill -0 "$pid" 2>/dev/null; do
+        local spin_char=${spinstr:$count:1}
+        printf "\r${blue}${message}${reset} [${cyan}${spin_char}${reset}] "
+        count=$(( (count + 1) % 4 ))
+        sleep $delay
+    done
+    
+    # Clear the spinner and show completion
+    printf "\r${blue}${message}${reset} [${green}OK${reset}] \n"
+}
+
+# Function to show dots loading for very long operations
+show_dots_loading() {
+    local message="$1"
+    local pid="$2"
+    local delay=1
+    local dots=""
+    local max_dots=3
+    
+    printf "${blue}${message}${reset}"
+    
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ ${#dots} -ge $max_dots ]; then
+            dots=""
+            printf "\r${blue}${message}${reset}   "
+            printf "\r${blue}${message}${reset}"
+        fi
+        dots="${dots}."
+        printf "${cyan}.${reset}"
+        sleep $delay
+    done
+    
+    # Show completion
+    printf " ${green}[OK]${reset}\n"
+}
+
+# Enhanced runCommand function
 runCommand(){
     COMMAND=$1
     LOG_MSG=${2:-"Executing command"}
     HIDE_OUTPUT=${3:-0}
     CRITICAL=${4:-0}  # If 1, exit on failure; if 0, just log error and continue
+    SHOW_LOADING=${5:-0}  # If 1, show spinner; if 2, show dots for very long operations
 
     log "DEBUG" "Command: $COMMAND"
     log "INFO" "$LOG_MSG"
@@ -207,14 +230,38 @@ runCommand(){
         fi
     fi
 
-    # Execute with appropriate output redirection
+    # Execute with appropriate output redirection and optional loading animation
     if [ "$HIDE_OUTPUT" -eq 1 ]; then
-        eval $COMMAND >> "$LOG_FILE" 2>&1
+        if [ "$SHOW_LOADING" -eq 1 ]; then
+            # Run command in background and show spinner
+            eval $COMMAND >> "$LOG_FILE" 2>&1 &
+            local cmd_pid=$!
+            show_loading "$LOG_MSG" $cmd_pid
+            wait $cmd_pid
+            BASH_CODE=$?
+        elif [ "$SHOW_LOADING" -eq 2 ]; then
+            # Run command in background and show dots for very long operations
+            eval $COMMAND >> "$LOG_FILE" 2>&1 &
+            local cmd_pid=$!
+            show_dots_loading "$LOG_MSG" $cmd_pid
+            wait $cmd_pid
+            BASH_CODE=$?
+        else
+            eval $COMMAND >> "$LOG_FILE" 2>&1
+            BASH_CODE=$?
+        fi
     else
-        eval $COMMAND 2>&1 | tee -a "$LOG_FILE"
+        if [ "$SHOW_LOADING" -ge 1 ]; then
+            # For visible output with loading, show a simple progress message
+            echo -e "${blue}${LOG_MSG}... ${yellow}(This may take a while)${reset}"
+            eval $COMMAND 2>&1 | tee -a "$LOG_FILE"
+            BASH_CODE=${PIPESTATUS[0]}
+        else
+            eval $COMMAND 2>&1 | tee -a "$LOG_FILE"
+            BASH_CODE=${PIPESTATUS[0]}
+        fi
     fi
 
-    BASH_CODE=$?
     if [ $BASH_CODE -ne 0 ]; then
         log "ERROR" "Command failed with exit code $BASH_CODE: $COMMAND"
         
@@ -230,7 +277,7 @@ runCommand(){
             log "ERROR" "Critical error occurred. Exiting."
             echo -e "${red}${bold}CRITICAL ERROR:${reset} $LOG_MSG failed."
             echo -e "Check the log file for details: $LOG_FILE"
-      exit ${BASH_CODE}
+            exit ${BASH_CODE}
         else
             log "WARN" "Command failed but continuing as error is non-critical."
             return ${BASH_CODE}
@@ -241,6 +288,356 @@ runCommand(){
     
     return 0
 }
+
+# =============================================================================
+# MARIADB/PHPMYADMIN INSTALLATION FUNCTIONS (formerly in phpmyadmin.sh)
+# =============================================================================
+
+# Function to check for existing MariaDB installation
+function serverCheck() {
+    status "System Check"
+    log "INFO" "Checking for existing MariaDB installation"
+    
+    mariadb --version >> "$LOG_FILE" 2>&1
+    if [[ $? != 127 ]]; then
+        log "WARN" "MariaDB is already installed"
+        if [[ "${non_interactive}" == "false" ]]; then
+            status "MariaDB already installed"
+            echo -e "${yellow}${bold}ATTENTION :${reset} MariaDB/MySQL is already installed on this system."
+            echo -e "${blue}What do you want to do ?${reset}\n"
+            
+            export OPTIONS=(
+                "Reset MySQL/MariaDB password and continue installation" 
+                "Remove MariaDB/MySQL completely" 
+                "Continue without reinstalling MariaDB"
+                "Quit the script"
+            )
+
+            bashSelect
+            case $? in
+                0 )
+                    log "INFO" "User chose to reset MySQL password"
+                    echo -e "${green}Selected:${reset} Reset MySQL password"
+                    ;;
+                1 )
+                    log "INFO" "User chose to remove MariaDB completely"
+                    echo -e "${green}Selected:${reset} Completely remove MariaDB"
+                    
+                    status "Removing MariaDB/MySQL"
+                    echo -e "${yellow}Completely removing MariaDB/MySQL...${reset}"
+                    runCommand "service mariadb stop || service mysql stop || systemctl stop mariadb" "Stopping MariaDB service" 1 0
+                    runCommand "DEBIAN_FRONTEND=noninteractive apt -y remove --purge mariadb-*" "Removing MariaDB packages" 1 1
+                    runCommand "rm -rf /var/lib/mysql/" "Removing MySQL data" 1 0
+                    log "SUCCESS" "MariaDB completely removed"
+                    ;;
+                2 )
+                    log "INFO" "User chose to continue without reinstalling"
+                    echo -e "${green}Selected:${reset} Continue without reinstalling MariaDB"
+                    return 0
+                    ;;
+                3 )
+                    log "INFO" "User chose to exit"
+                    echo -e "${yellow}Installation canceled by user.${reset}"
+                    exit 0
+                    ;;
+            esac
+        else
+            log "WARN" "MariaDB already installed in non-interactive mode, continuing"
+        fi
+    fi
+
+    if [[ -d /usr/share/phpmyadmin ]]; then
+        log "WARN" "phpMyAdmin directory already exists"
+        if [[ "${non_interactive}" == "false" ]]; then
+            status "phpMyAdmin already present"
+            echo -e "${yellow}${bold}ATTENTION :${reset} The phpMyAdmin directory already exists."
+            echo -e "${blue}What do you want to do ?${reset}\n"
+
+            export OPTIONS=(
+                "Remove the existing phpMyAdmin directory" 
+                "Continue without reinstalling phpMyAdmin"
+                "Quit the script"
+            )
+
+            bashSelect
+            case $? in
+                0 )
+                    log "INFO" "User chose to remove existing phpMyAdmin"
+                    echo -e "${green}Selected:${reset} Remove existing phpMyAdmin"
+                    runCommand "rm -rf /usr/share/phpmyadmin/" "Removing existing phpMyAdmin directory" 1 1
+                    ;;
+                1 )
+                    log "INFO" "User chose to continue without reinstalling phpMyAdmin"
+                    echo -e "${green}Selected:${reset} Continue without reinstalling phpMyAdmin"
+                    return 0
+                    ;;
+                2 )
+                    log "INFO" "User chose to exit due to existing phpMyAdmin"
+                    echo -e "${yellow}Installation canceled by user.${reset}"
+                    exit 0
+                    ;;
+            esac
+        else
+            log "INFO" "phpMyAdmin already exists in non-interactive mode, removing"
+            runCommand "rm -rf /usr/share/phpmyadmin/" "Removing existing phpMyAdmin directory" 1 1
+        fi
+    fi
+}
+
+# Function to install PHP
+function phpinstall() {
+    log "INFO" "Installing PHP"
+    
+    eval $( cat /etc/*release* )
+    if [[ "$ID" == "debian" && $VERSION_ID > 10 ]]; then
+        runCommand "wget -O /etc/apt/trusted.gpg.d/php.gpg https://packages.sury.org/php/apt.gpg" "adding main PHP repository for Debian - https://deb.sury.org" 1 0
+        runCommand "sh -c 'echo \"deb https://packages.sury.org/php/ \$(lsb_release -sc) main\" > /etc/apt/sources.list.d/php.list'" "Adding PHP repository" 1 0
+        runCommand "apt -y update" "Updating package lists" 1 1
+        runCommand "apt -y install php8.3 php8.3-{cli,fpm,common,mysql,zip,gd,mbstring,curl,xml,bcmath} libapache2-mod-php8.3" "installing php8.3" 1 1
+    else
+        runCommand "apt -y install php php-{cli,fpm,common,mysql,zip,gd,mbstring,curl,xml,bcmath} libapache2-mod-php" "installing default php version" 1 1
+    fi
+}
+
+# Function to install and configure Apache
+function webserverInstall(){
+    log "INFO" "Configuring Apache for phpMyAdmin"
+    
+    cat > /etc/apache2/conf-available/phpmyadmin.conf << 'EOF'
+Alias /phpmyadmin /usr/share/phpmyadmin
+
+<Directory /usr/share/phpmyadmin>
+    Options SymLinksIfOwnerMatch
+    DirectoryIndex index.php
+
+    <IfModule mod_php5.c>
+        <IfModule mod_mime.c>
+            AddType application/x-httpd-php .php
+        </IfModule>
+        <FilesMatch ".+\.php$">
+            SetHandler application/x-httpd-php
+        </FilesMatch>
+
+        php_value include_path .
+        php_admin_value upload_tmp_dir /var/lib/phpmyadmin/tmp
+        php_admin_value open_basedir /usr/share/phpmyadmin/:/etc/phpmyadmin/:/var/lib/phpmyadmin/:/usr/share/php/php-gettext/:/usr/share/php/php-php-gettext/:/usr/share/javascript/:/usr/share/php/tcpdf/:/usr/share/doc/phpmyadmin/:/usr/share/php/phpseclib/
+        php_admin_value mbstring.func_overload 0
+    </IfModule>
+    <IfModule mod_php.c>
+        <IfModule mod_mime.c>
+            AddType application/x-httpd-php .php
+        </IfModule>
+        <FilesMatch ".+\.php$">
+            SetHandler application/x-httpd-php
+        </FilesMatch>
+
+        php_value include_path .
+        php_admin_value upload_tmp_dir /var/lib/phpmyadmin/tmp
+        php_admin_value open_basedir /usr/share/phpmyadmin/:/etc/phpmyadmin/:/var/lib/phpmyadmin/:/usr/share/php/php-gettext/:/usr/share/php/php-php-gettext/:/usr/share/javascript/:/usr/share/php/tcpdf/:/usr/share/doc/phpmyadmin/:/usr/share/php/phpseclib/
+        php_admin_value mbstring.func_overload 0
+    </IfModule>
+
+</Directory>
+
+# Authorize for setup
+<Directory /usr/share/phpmyadmin/setup>
+    <IfModule mod_authz_core.c>
+        <IfModule mod_authn_file.c>
+            AuthType Basic
+            AuthName "phpMyAdmin Setup"
+            AuthUserFile /etc/phpmyadmin/htpasswd.setup
+        </IfModule>
+        Require valid-user
+    </IfModule>
+</Directory>
+
+# Disallow web access to directories that dont need it
+<Directory /usr/share/phpmyadmin/templates>
+    Require all denied
+</Directory>
+<Directory /usr/share/phpmyadmin/libraries>
+    Require all denied
+</Directory>
+<Directory /usr/share/phpmyadmin/setup/lib>
+    Require all denied
+</Directory>
+EOF
+
+    runCommand "/etc/init.d/apache2 start" "Starting Apache" 1 0
+    runCommand "a2enconf phpmyadmin.conf" "Enabling phpMyAdmin configuration" 1 1
+    
+    phpinstall
+    
+    runCommand "service apache2 restart" "Restarting Apache" 1 1
+}
+
+# Function to install and secure MariaDB
+function dbInstall(){
+    status "generating passwords"
+    rootPasswordMariaDB=$( pwgen 16 1 );
+    pmaPassword=$( pwgen 32 1 );
+    blowfish_secret=$( pwgen 32 1 );
+    
+    log "INFO" "Generated passwords for MariaDB and phpMyAdmin"
+
+    status "securing the mariadb installation"
+
+    # First, set the root password using mysql_secure_installation approach
+    runCommand "mariadb -u root -e \"ALTER USER 'root'@'localhost' IDENTIFIED BY '${rootPasswordMariaDB}';\"" "Setting root password" 1 1
+    runCommand "mariadb -u root -p${rootPasswordMariaDB} -e \"DELETE FROM mysql.user WHERE User='';\"" "Removing anonymous users" 1 1
+    
+    # Remove test database
+    runCommand "mariadb -u root -p${rootPasswordMariaDB} -e \"DROP DATABASE IF EXISTS test;\"" "Removing test database" 1 0
+    runCommand "mariadb -u root -p${rootPasswordMariaDB} -e \"DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';\"" "Removing test database privileges" 1 0
+    
+    # Create remote root access with proper approach for MariaDB 11.4
+    log "INFO" "Configuring remote root access"
+    cat > /tmp/remote_root.sql << EOF
+CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY '${rootPasswordMariaDB}';
+GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;
+FLUSH PRIVILEGES;
+EOF
+    
+    runCommand "mariadb -u root -p${rootPasswordMariaDB} < /tmp/remote_root.sql" "Configuring remote root access" 1 1
+    rm -f /tmp/remote_root.sql
+
+    # Configure MariaDB to listen on all interfaces
+    runCommand "sed -i -E 's/^#?bind-address\s*=.*/bind-address = 0.0.0.0/' /etc/mysql/mariadb.conf.d/50-server.cnf" "Configuring MariaDB bind-address" 1 1
+    runCommand "systemctl restart mariadb || service mariadb restart" "Restarting MariaDB service to apply bind-address" 1 1 1
+}
+
+# Function to install and configure phpMyAdmin
+function pmaInstall() {
+    log "INFO" "Installing phpMyAdmin"
+
+    runCommand "wget https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-languages.zip" "Downloading phpMyAdmin" 1 1 2
+    runCommand "unzip phpMyAdmin-latest-all-languages.zip" "Extracting phpMyAdmin" 1 1 1
+    runCommand "rm phpMyAdmin-latest-all-languages.zip" "Removing downloaded archive" 1 1
+    runCommand "mv phpMyAdmin-* /usr/share/phpmyadmin" "Moving phpMyAdmin files" 1 1
+    runCommand "mkdir -p /var/lib/phpmyadmin/tmp" "Creating temporary directory" 1 1
+    runCommand "cp /usr/share/phpmyadmin/config.sample.inc.php /usr/share/phpmyadmin/config.inc.php" "Copying configuration file" 1 1
+
+    # Configuration of phpMyAdmin settings
+    log "INFO" "Configuring phpMyAdmin settings"
+    
+    # Configure blowfish secret - use single quotes to avoid shell expansion
+    runCommand "sed -i \"s/\\\$cfg\\['blowfish_secret'\\] = '';/\\\$cfg\\['blowfish_secret'\\] = '${blowfish_secret}';/\" /usr/share/phpmyadmin/config.inc.php" "Configuring blowfish secret" 1 1
+
+    # Configuration of phpMyAdmin control tables - avoid shell expansion issues
+    sed -i 's|// $cfg\['\''Servers'\''\]\[$i\]\['\''controluser'\''\] = '\''pma'\'';|$cfg['\''Servers'\''][$i]['\''controluser'\''] = '\''pma'\'';|' /usr/share/phpmyadmin/config.inc.php
+    sed -i "s|// \$cfg\\['Servers'\\]\\[\$i\\]\\['controlpass'\\] = 'pmapass';|\$cfg['Servers'][\$i]['controlpass'] = '${pmaPassword}';|" /usr/share/phpmyadmin/config.inc.php
+    sed -i 's|// $cfg\['\''Servers'\''\]\[$i\]\['\''pmadb'\''\] = '\''phpmyadmin'\'';|$cfg['\''Servers'\''][$i]['\''pmadb'\''] = '\''phpmyadmin'\'';|' /usr/share/phpmyadmin/config.inc.php
+
+    # Configuration of phpMyAdmin tables
+    local table_configs=(
+        "bookmarktable" "relation" "table_info" "table_coords" "pdf_pages" 
+        "column_info" "history" "table_uiprefs" "tracking" "userconfig" 
+        "recent" "favorite" "users" "usergroups" "navigationhiding" 
+        "savedsearches" "central_columns" "designer_settings" "export_templates"
+    )
+    
+    for table in "${table_configs[@]}"; do
+        sed -i "s|// \$cfg\\['Servers'\\]\\[\$i\\]\\['${table}'\\] = 'pma__${table}';|\$cfg['Servers'][\$i]['${table}'] = 'pma__${table}';|" /usr/share/phpmyadmin/config.inc.php >> "$LOG_FILE" 2>&1
+    done
+
+    runCommand "printf \"\\\$cfg['TempDir'] = '/var/lib/phpmyadmin/tmp';\" >> /usr/share/phpmyadmin/config.inc.php" "Configuring temporary directory" 1 1
+
+    runCommand "chown -R www-data:www-data /var/lib/phpmyadmin" "Setting permissions" 1 1
+    runCommand "service mariadb start || service mysql start || systemctl start mariadb" "Starting MariaDB service" 1 1
+    runCommand "mariadb -u root -p${rootPasswordMariaDB} < /usr/share/phpmyadmin/sql/create_tables.sql" "Importing phpMyAdmin tables" 1 1 1
+    runCommand "mariadb -u root -p${rootPasswordMariaDB} -e \"CREATE USER IF NOT EXISTS 'pma'@'localhost' IDENTIFIED BY '${pmaPassword}';\"" "Creating phpMyAdmin control user" 1 1
+    
+    # Use SQL without shell expansion issues - avoid wildcards in runCommand
+    log "INFO" "Granting privileges to phpMyAdmin control user"
+    cat > /tmp/grant_pma.sql << EOF
+GRANT SELECT, INSERT, UPDATE, DELETE ON phpmyadmin.* TO 'pma'@'localhost';
+EOF
+    
+    mariadb -u root -p${rootPasswordMariaDB} < /tmp/grant_pma.sql >> "$LOG_FILE" 2>&1
+    if [ $? -eq 0 ]; then
+        log "SUCCESS" "Granting privileges to phpMyAdmin control user - Completed successfully"
+    else
+        log "ERROR" "Failed to grant privileges to phpMyAdmin control user"
+        rm -f /tmp/grant_pma.sql
+        return 1
+    fi
+    
+    rm -f /tmp/grant_pma.sql
+    runCommand "mariadb -u root -p${rootPasswordMariaDB} -e \"FLUSH PRIVILEGES;\"" "Flushing privileges" 1 1
+}
+
+# Main phpMyAdmin installation function
+function install_mariadb_phpmyadmin(){
+    log "INFO" "Starting MariaDB and phpMyAdmin installation"
+    
+    echo -e "\n${cyan}╔═══════════════════════════════════════════════════════════════════════════════╗${reset}"
+    echo -e "${cyan}║ ${bold}${green}                    MARIADB & PHPMYADMIN INSTALLATION                    ${reset}${cyan}║${reset}"
+    echo -e "${cyan}║ ${reset}${blue}                          Version: $script_version                           ${reset}${cyan}║${reset}"
+    echo -e "${cyan}╚═══════════════════════════════════════════════════════════════════════════════╝${reset}\n"
+
+    # System check
+    serverCheck
+
+    echo -e "${green}=== Database Installation Progress ===${reset}"
+    echo -e "${blue}Step 1/8: Updating system packages...${reset}"
+    runCommand "apt -y update" "Updating package list" 1 1 1
+
+    echo -e "${blue}Step 2/8: Upgrading system packages...${reset}"
+    runCommand "apt -y upgrade" "Upgrading system packages" 1 1 2
+
+    # Add MariaDB 11.4 repository for latest version
+    echo -e "${blue}Step 3/8: Setting up MariaDB 11.4 repository...${reset}"
+    status "Adding MariaDB 11.4 repository"
+    runCommand "apt install -y apt-transport-https curl gnupg lsb-release" "Installing repository tools" 1 1 1
+    
+    # Detect distribution and set appropriate repository
+    eval $( cat /etc/*release* )
+    DISTRO=$(lsb_release -si | tr '[:upper:]' '[:lower:]')
+    CODENAME=$(lsb_release -sc)
+    
+    if [[ "$DISTRO" == "ubuntu" ]]; then
+        MARIADB_REPO="deb https://deb.mariadb.org/11.4/ubuntu $CODENAME main"
+    elif [[ "$DISTRO" == "debian" ]]; then
+        MARIADB_REPO="deb https://deb.mariadb.org/11.4/debian $CODENAME main"
+    else
+        # Fallback to Ubuntu jammy for unknown distributions
+        MARIADB_REPO="deb https://deb.mariadb.org/11.4/ubuntu jammy main"
+        log "WARN" "Unknown distribution detected, using Ubuntu jammy repository"
+        echo -e "${yellow}Unknown distribution detected, using Ubuntu jammy repository${reset}"
+    fi
+    
+    log "INFO" "Adding MariaDB repository for $DISTRO $CODENAME"
+    echo -e "${blue}Adding MariaDB repository for $DISTRO $CODENAME${reset}"
+    runCommand "curl -o /etc/apt/trusted.gpg.d/mariadb_release_signing_key.asc 'https://mariadb.org/mariadb_release_signing_key.asc'" "Downloading MariaDB GPG key" 1 1
+    runCommand "sh -c \"echo '$MARIADB_REPO' > /etc/apt/sources.list.d/mariadb.list\"" "Configuring MariaDB repository" 1 1
+    
+    # Update package list with new repository
+    echo -e "${blue}Step 4/8: Updating package lists with MariaDB repository...${reset}"
+    runCommand "apt -y update" "Updating with new repository" 1 1 1
+
+    echo -e "${blue}Step 5/8: Installing Apache2, MariaDB 11.4, and required packages...${reset}"
+    echo -e "${yellow}This step may take several minutes depending on your internet connection...${reset}"
+    runCommand "apt install -y apache2 mariadb-server=1:11.4* mariadb-client=1:11.4* pwgen expect iproute2 wget zip apt-transport-https lsb-release ca-certificates curl dialog unzip" "Installing necessary packages with MariaDB 11.4" 1 1 2
+
+    echo -e "${blue}Step 6/8: Starting MariaDB service...${reset}"
+    runCommand "service mariadb start || service mysql start || systemctl start mariadb" "Starting MariaDB service" 1 1
+
+    echo -e "${blue}Step 7/8: Configuring MariaDB security and phpMyAdmin...${reset}"
+    dbInstall
+    pmaInstall
+
+    echo -e "${blue}Step 8/8: Finalizing installation...${reset}"
+    runCommand "service mariadb restart || service mysql restart || systemctl restart mariadb" "Restarting MariaDB service" 1 1
+
+    webserverInstall
+
+    log "SUCCESS" "MariaDB and phpMyAdmin installation completed successfully"
+    echo -e "\n${green}✓ MariaDB and phpMyAdmin installation completed!${reset}"
+}
+
+# =============================================================================
+# END OF MARIADB/PHPMYADMIN FUNCTIONS
+# =============================================================================
 
 # Function to safely exit the script
 cleanup_and_exit() {
@@ -269,90 +666,170 @@ cleanup_and_exit() {
 # Trap signals to ensure clean exit
 trap 'cleanup_and_exit 130 "${red}Process interrupted by user. Exiting...${reset}"' INT TERM
 
-# Function to validate and parse URL
-validate_url() {
-    local url=$1
-    
-    if [[ $url != http*://* ]]; then
-        log "ERROR" "Invalid URL format: $url"
-        return 1
+# =============================================================================
+# BASHSELECT FUNCTION (formerly in bashselect.sh)
+# =============================================================================
+
+function bashSelect() {
+  function printOptions() { # printing the different options
+    it=$1
+    for i in "${!OPTIONS[@]}"; do
+      if [[ "$i" -eq "$it" ]]; then
+        echo -e "\033[7m  $i) ${OPTIONS[$i]} \033[0m"
+      else
+        echo "  $i) ${OPTIONS[$i]}"
+      fi
+    done
+  }
+
+  trap 'echo -ne "\033[?25h"; exit' SIGINT SIGTERM
+  echo -ne "\033[?25l"
+  it=0
+
+  printOptions $it
+
+  while true; do # loop through array to capture every key press until enter is pressed
+    # capture key input
+    read -rsn1 key
+    if [[ $key == $'\x1b' ]]; then
+      read -rsn2 key
     fi
-    
-    # Check if URL is reachable
-    if ! curl --output /dev/null --silent --head --fail "$url"; then
-        log "ERROR" "URL not reachable: $url"
-        return 1
+
+    echo -ne "\033[${#OPTIONS[@]}A\033[J"
+
+    # handle key input
+    case $key in
+      '[A' | '[C') ((it--));; # up or right arrow
+      '[B' | '[D') ((it++));; # down or left arrow
+      '')
+        echo -ne "\033[?25h"
+        return "$it"
+        ;;
+    esac
+
+    # manage that you can't select something out of range
+    min_len=0
+    max_len=$(( ${#OPTIONS[@]} - 1 ))
+    if [[ "$it" -lt "$min_len" ]]; then
+      it=$max_len
+    elif [[ "$it" -gt "$max_len" ]]; then
+      it=$min_len
     fi
-    
-    return 0
+
+    printOptions $it
+
+  done
 }
 
-# Determine the default installation path
-get_default_dir() {
-    # Try multiple methods to get the current user
-    local current_user=$(who am i 2>/dev/null | awk '{print $1}')
-    
-    # If 'who am i' fails, try other methods
-    if [ -z "$current_user" ]; then
-        current_user=$(whoami 2>/dev/null)
-    fi
-    
-    # If that also fails, try environment variables
-    if [ -z "$current_user" ]; then
-        current_user=${USER:-${USERNAME:-root}}
-    fi
-    
-    # If we still don't have a user, default to root
-    if [ -z "$current_user" ] || [ "$current_user" == "root" ]; then
-        # Write directly to log file without console output
-        echo "$(date "+%Y-%m-%d %H:%M:%S") [DEBUG]    Running as root or couldn't determine user, setting default directory to /home/FiveM" >> "$LOG_FILE"
-        echo "/home/FiveM"
-    else
-        local home_dir="/home/$current_user/FiveM"
-        # Write directly to log file without console output
-        echo "$(date "+%Y-%m-%d %H:%M:%S") [DEBUG]    Running as $current_user, setting default directory to $home_dir" >> "$LOG_FILE"
-        echo "$home_dir"
-    fi
-}
+# =============================================================================
+# DATABASE CONFIGURATION FUNCTIONS
+# =============================================================================
 
-# Function to choose the installation path
-choose_installation_path() {
-    default_dir=$(get_default_dir)
+# Function to configure existing database
+function configureExistingDatabase() {
+    log "INFO" "Configuring existing database connection"
     
     if [[ "${non_interactive}" == "false" ]]; then
-        log "PROMPT" "Prompting user for installation path"
-        echo -e "${bold}Choose the installation path for FiveM${reset}"
-        echo -e "${blue}This is where all server files will be stored${reset}"
-        read -p "Installation path [$default_dir]: " input_dir
-        dir=${input_dir:-$default_dir}
-    else
-        dir=$default_dir
-        log "INFO" "Non-interactive mode: using default path $dir"
-    fi
-    
-    # Validate directory path
-    if [[ "$dir" =~ [[:space:]] ]]; then
-        log "ERROR" "Installation path cannot contain spaces: '$dir'"
-        if [[ "${non_interactive}" == "false" ]]; then
-            echo -e "${red}Error:${reset} Installation path cannot contain spaces."
-            choose_installation_path
-            return
+        status "Existing Database Configuration"
+        echo -e "${cyan}Please provide your existing database connection details:${reset}\n"
+        
+        # Get database host
+        read -p "Database Host/IP (default: localhost): " existing_db_host
+        existing_db_host=${existing_db_host:-localhost}
+        
+        # Get database name  
+        read -p "Database Name (default: fivem): " existing_db_name
+        existing_db_name=${existing_db_name:-fivem}
+        
+        # Get database user
+        read -p "Database User (default: root): " existing_db_user
+        existing_db_user=${existing_db_user:-root}
+        
+        # Get database password
+        echo -n "Database Password: "
+        read -s existing_db_password
+        echo
+        
+        # Test database connection
+        echo -e "\n${blue}Testing database connection...${reset}"
+        if mysql -h"$existing_db_host" -u"$existing_db_user" -p"$existing_db_password" -e "USE $existing_db_name;" 2>/dev/null; then
+            log "SUCCESS" "Database connection test successful"
+            echo -e "${green}✓ Database connection successful!${reset}"
+            existing_db_configured=true
         else
-            cleanup_and_exit 1 "${red}Error:${reset} Installation path cannot contain spaces in non-interactive mode."
+            log "ERROR" "Database connection test failed"
+            echo -e "${red}✗ Database connection failed!${reset}"
+            echo -e "${yellow}Please check your database credentials and try again.${reset}"
+            existing_db_configured=false
+            return 1
+        fi
+    else
+        log "WARN" "Existing database configuration skipped in non-interactive mode"
+        existing_db_configured=false
+    fi
+}
+
+function installPma(){
+    if [[ "${non_interactive}" == "false" ]]; then
+        if [[ "${install_phpmyadmin}" == "0" ]]; then
+            status "Database Configuration"
+            echo -e "${cyan}FiveM can use a database to store persistent data.${reset}"
+            echo -e "${blue}You can install MariaDB/MySQL and phpMyAdmin, or use an existing database.${reset}\n"
+            
+            export OPTIONS=(
+                "Install MariaDB/MySQL and phpMyAdmin (recommended for new users)" 
+                "Use existing database" 
+                "Do not configure database"
+            )
+
+            bashSelect
+
+            case $? in
+                0 )
+                    install_phpmyadmin="true"
+                    existing_db_configured=false
+                    log "INFO" "phpMyAdmin installation enabled"
+                    echo -e "${green}MariaDB/MySQL and phpMyAdmin installation selected${reset}"
+                    ;;
+                1 )
+                    install_phpmyadmin="false"
+                    existing_db_configured=true
+                    log "INFO" "Existing database configuration selected"
+                    echo -e "${green}Existing database configuration selected${reset}"
+                    configureExistingDatabase
+                    ;;
+                2 )
+                    install_phpmyadmin="false"
+                    existing_db_configured=false
+                    log "INFO" "No database installation/configuration"
+                    echo -e "${yellow}No database will be configured${reset}"
+                    ;;
+            esac
         fi
     fi
     
-    # Resolve to absolute path if relative
-    if [[ ! "$dir" =~ ^/ ]]; then
-        dir="$(pwd)/$dir"
-        log "INFO" "Converted to absolute path: $dir"
+    if [[ "${install_phpmyadmin}" == "true" ]]; then
+        # Use integrated MariaDB/phpMyAdmin installation
+        install_mariadb_phpmyadmin
     fi
-    
-    log "INFO" "FiveM will be installed in: $dir"
-    echo -e "${green}FiveM will be installed in:${reset} ${bold}$dir${reset}"
 }
 
-function selectVersion(){
+# =============================================================================
+# FIVEM INSTALLATION FUNCTIONS
+# =============================================================================
+
+# Function to validate URL
+validate_url() {
+    local url="$1"
+    if curl --connect-timeout 10 --max-time 30 --output /dev/null --silent --head --fail "$url" 2>/dev/null; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Function to select FiveM version (based on your working method)
+selectVersion(){
     log "INFO" "Retrieving available versions"
     
     # Use the simpler and more reliable method from the old script
@@ -428,7 +905,7 @@ function selectVersion(){
                     log "INFO" "Showing all available versions for user selection"
                     
                     # Get more versions to choose from
-                    local all_full_versions=$(curl -s https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/ | grep -oP '[0-9]+\.[0-9]+\.[0-9]+/' | sort -Vr)
+                    local all_versions=$(curl -s https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/ | egrep -o '[0-9][^/]*/fx.tar.xz' | head -10)
                     
                     # Create array of versions for bashSelect
                     local version_options=()
@@ -438,13 +915,13 @@ function selectVersion(){
                     echo -e "${cyan}Recent versions:${reset}"
                     while read version && [ $i -lt 10 ]; do
                         if [ -n "$version" ]; then
-                            # Extract just the version number (remove trailing slash)
-                            clean_version=${version%/}
+                            # Extract just the version number (remove /fx.tar.xz)
+                            clean_version=${version%/fx.tar.xz}
                             version_options+=("Version ${clean_version}")
                             version_urls+=("https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/$clean_version/fx.tar.xz")
                             i=$((i+1))
                         fi
-                    done <<< "$all_full_versions"
+                    done <<< "$all_versions"
                     
                     # Add option for custom URL
                     version_options+=("Enter custom version or URL")
@@ -510,543 +987,333 @@ function selectVersion(){
     fi
 }
 
-function examServData() {
-  runCommand "mkdir -p $dir/server-data" "Creating server-data directory"
-  runCommand "git clone -q https://github.com/citizenfx/cfx-server-data.git $dir/server-data" "Downloading server data"
-  status "Creating example server.cfg file"
+# Function to download and extract server artifacts
+download_server_artifacts() {
+    local install_dir=$1
+    
+    status "Downloading FiveM Server Artifacts"
+    log "INFO" "Downloading server artifacts to $install_dir"
+    
+    # Create temp directory for download
+    temp_dir=$(mktemp -d)
+    cd "$temp_dir"
+    
+    # artifacts_version should now contain the full URL
+    local download_url="$artifacts_version"
+    
+    log "INFO" "Downloading from: $download_url"
+    
+    # Try wget first
+    local download_success=false
+    if wget --timeout=60 --tries=3 -O fx.tar.xz "$download_url" >> "$LOG_FILE" 2>&1; then
+        log "SUCCESS" "Download successful with wget"
+        download_success=true
+    else
+        log "WARN" "wget failed, trying curl"
+        # Try curl as fallback
+        if curl --connect-timeout 10 --max-time 300 -L -o fx.tar.xz "$download_url" >> "$LOG_FILE" 2>&1; then
+            log "SUCCESS" "Download successful with curl"
+            download_success=true
+        else
+            log "ERROR" "Both wget and curl failed"
+        fi
+    fi
+    
+    if [[ "$download_success" != "true" ]]; then
+        log "ERROR" "Download failed from: $download_url"
+        cd /
+        rm -rf "$temp_dir"
+        return 1
+    fi
+    
+    # Verify downloaded file
+    if [[ ! -f "fx.tar.xz" ]] || [[ ! -s "fx.tar.xz" ]]; then
+        log "ERROR" "Downloaded file is missing or empty"
+        cd /
+        rm -rf "$temp_dir"
+        return 1
+    fi
+    
+    # Extract to install directory
+    log "INFO" "Extracting artifacts to $install_dir"
+    if tar -xJf fx.tar.xz -C "$install_dir" >> "$LOG_FILE" 2>&1; then
+        log "SUCCESS" "Extraction successful"
+    else
+        log "ERROR" "Extraction failed"
+        cd /
+        rm -rf "$temp_dir"
+        return 1
+    fi
+    
+    # Cleanup
+    cd /
+    rm -rf "$temp_dir"
+    
+    log "SUCCESS" "Server artifacts downloaded and extracted successfully"
+}
 
-  cat << EOF > $dir/server-data/server.cfg
-# Only change the IP if you're using a server with multiple network interfaces, otherwise change the port only.
+# Function to let user choose artifacts version (wrapper for selectVersion)
+choose_artifacts_version() {
+    if [[ "$artifacts_version" == "0" ]]; then
+        selectVersion
+    fi
+}
+
+# Function to create server configuration
+create_server_config() {
+    local install_dir=$1
+    
+    status "Creating Server Configuration"
+    log "INFO" "Creating server configuration files"
+    
+    # Create server.cfg
+    cat > "$install_dir/server.cfg" << 'EOF'
+# FiveM Server Configuration
+# Generated by FiveM Server Installer
+
+## Server Information
+sv_hostname "My FiveM Server"
+sv_maxclients 48
+
+## Server Identity
+set sv_projectName "My FiveM Server"
+set sv_projectDesc "A FiveM server created with the installer"
+
+## License Key (REQUIRED)
+# Get your license key from https://keymaster.fivem.net/
+# sv_licenseKey "YOUR_LICENSE_KEY_HERE"
+
+## Server Endpoints
 endpoint_add_tcp "0.0.0.0:30120"
 endpoint_add_udp "0.0.0.0:30120"
 
-# These resources will start by default.
-ensure mapmanager
-ensure chat
-ensure spawnmanager
-ensure sessionmanager
-ensure basic-gamemode
-ensure hardcap
-ensure rconlog
-
-# This allows players to use scripthook-based plugins such as the legacy Lambda Menu.
-# Set this to 1 to allow scripthook. Do note that this does _not_ guarantee players won't be able to use external plugins.
-sv_scriptHookAllowed 0
-
-# Uncomment this and set a password to enable RCON. Make sure to change the password - it should look like set rcon_password "YOURPASSWORD"
-#set rcon_password ""
-
-# A comma-separated list of tags for your server.
-# For example:
-# - sets tags "drifting, cars, racing"
-# Or:
-# - sets tags "roleplay, military, tanks"
-sets tags "default"
-
-# A valid locale identifier for your server's primary language.
-# For example "en-US", "fr-CA", "nl-NL", "de-DE", "en-GB", "pt-BR"
-sets locale "en-US" 
-
-# Set an optional server info and connecting banner image url.
-# Size doesn't matter, any banner sized image will be fine.
-#sets banner_detail "https://url.to/image.png"
-#sets banner_connecting "https://url.to/image.png"
-
-# Set your server's hostname. This is not usually shown anywhere in listings.
-sv_hostname "FXServer, but unconfigured"
-
-# Set your server's Project Name
-sets sv_projectName "My FXServer Project"
-
-# Set your server's Project Description
-sets sv_projectDesc "Default FXServer requiring configuration"
-
-# Set Game Build (https://docs.fivem.net/docs/server-manual/server-commands/#sv_enforcegamebuild-build)
-#sv_enforceGameBuild 2802
-
-# Nested configs!
-#exec server_internal.cfg
-
-# Loading a server icon (96x96 PNG file)
-#load_server_icon myLogo.png
-
-# convars which can be used in scripts
-set temp_convar "hey world!"
-
-# Remove the \`#\` from the below line if you want your server to be listed as 'private' in the server browser.
-# Do not edit it if you *do not* want your server listed as 'private'.
-# Check the following url for more detailed information about this:
-# https://docs.fivem.net/docs/server-manual/server-commands/#sv_master1-newvalue
-#sv_master1 ""
-
-# Add system admins
+## Server Commands
 add_ace group.admin command allow # allow all commands
 add_ace group.admin command.quit deny # but don't allow quit
 add_principal identifier.fivem:1 group.admin # add the admin to the group
 
-# enable OneSync (required for server-side state awareness)
+# Hide player endpoints from the API
+set sv_endpointprivacy true
+
+# Server player slot reservation
+set sv_slotpriority ""
+
+# Grant permissions to the user with the admin rights
+add_ace resource.webadmin command.restart allow
+add_ace resource.webadmin command.stop allow
+
+# Enable OneSync (required for 32+ players)
 set onesync on
 
-# Server player slot limit (see https://fivem.net/server-hosting for limits)
-sv_maxclients 48
+## Voice Chat Configuration
+setr voice_use3dAudio true
+setr voice_useSendingRangeOnly true
 
-# Steam Web API key, if you want to use Steam authentication (https://steamcommunity.com/dev/apikey)
-# -> replace "" with the key
-set steam_webApiKey ""
+## Resource Settings
+ensure mapmanager
+ensure chat
+ensure spawnmanager
+ensure sessionmanager
+ensure hardcap
+ensure baseevents
 
-# License key for your server (https://portal.cfx.re)
-sv_licenseKey changeme
+## Custom Resources
+# ensure my-custom-resource
+
+## Loading Screen (optional)
+# loadscreen_manual_shutdown 'yes'
+# loadscreen http://example.com/loading.html
+
+## Download Settings
+set sv_downloadUrl ""
+
+## Scripting
+set mysql_connection_string "server=localhost;uid=root;password=YOUR_DB_PASSWORD;database=fivem;port=3306;"
+
+## Additional Settings
+set sv_enforceGameBuild 2545
+
+# Console Commands
+exec permissions.cfg
 EOF
-  log "INFO" "server.cfg file created successfully"
+
+    # Create permissions.cfg
+    cat > "$install_dir/permissions.cfg" << 'EOF'
+# Permissions Configuration
+# Add your admins here
+
+## Admin Commands
+add_ace group.admin command allow
+add_ace group.admin command.quit deny
+
+## Add your admin identifiers here
+# Example:
+# add_principal identifier.license:YOUR_LICENSE_HERE group.admin
+# add_principal identifier.steam:YOUR_STEAM_HEX_HERE group.admin
+# add_principal identifier.fivem:YOUR_FIVEM_ID_HERE group.admin
+EOF
+
+    # Create cache and logs directories
+    mkdir -p "$install_dir/cache"
+    mkdir -p "$install_dir/logs"
+    
+    log "SUCCESS" "Server configuration files created"
 }
 
-function checkPort(){
-    log "DEBUG" "Checking port 40120"
-    
-    if lsof -i :40120 >> "$LOG_FILE" 2>&1; then
-        log "WARN" "Port 40120 is already in use"
+# Function to create database tables for FiveM
+create_fivem_database() {
+    if [[ "$existing_db_configured" == "true" ]]; then
+        log "INFO" "Creating FiveM database with existing database credentials"
         
-        if [[ "${non_interactive}" == "false" ]]; then
-            if [[ "${kill_txAdmin}" == "0" ]]; then
-                status "Port conflict detected"
-                echo -e "${red}${bold}Port conflict:${reset} Something is already running on the default TxAdmin port (40120)."
-                echo -e "${yellow}This could be another FiveM server or a different application.${reset}"
-                
-                export OPTIONS=(
-                    "Kill process on port 40120" 
-                    "Exit script"
-                )
-                
-                bashSelect
-
-                case $? in
-                    0 )
-                        kill_txAdmin="true"
-                        log "INFO" "User chose to kill process on port 40120"
-                        ;;
-                    1 )
-                        log "INFO" "User chose to exit due to port conflict"
-                        cleanup_and_exit 0 "Installation cancelled due to port conflict."
-                        ;;
-                esac
-            fi
-        fi
-        
-        if [[ "${kill_txAdmin}" == "true" ]]; then
-            status "Stopping process on port 40120"
-            
-            # Make sure psmisc is installed for fuser command
-            if ! command -v fuser &> /dev/null; then
-                runCommand "apt -y install psmisc" "Installing psmisc package for fuser command" 1 1
-            fi
-            
-            # Try to identify the process using the port
-            pid=$(lsof -ti :40120)
-            if [ -n "$pid" ]; then
-                proc_name=$(ps -p "$pid" -o comm=)
-                log "INFO" "Found process using port 40120: PID $pid ($proc_name)"
-                echo -e "${yellow}Found process:${reset} $proc_name (PID: $pid)"
-            fi
-            
-            # Kill the process
-            runCommand "fuser -k -n tcp 40120" "Forcefully stopping process on port 40120" 1 0
-            
-            # Verify the port is now free
-            sleep 2
-            if lsof -i :40120 >> "$LOG_FILE" 2>&1; then
-                log "ERROR" "Failed to free port 40120, process is still running"
-                echo -e "${red}${bold}ERROR:${reset} Failed to stop the process on port 40120."
-                echo -e "${yellow}You may need to manually stop the process or restart your server.${reset}"
-                
-                if [[ "${non_interactive}" == "false" ]]; then
-                    echo -e "${yellow}Do you want to continue anyway? This may cause issues.${reset}"
-                    read -p "Continue? (y/N): " -n 1 -r
-                    echo
-                    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                        cleanup_and_exit 1 "Installation aborted due to port conflict."
-                    fi
-                else
-                    cleanup_and_exit 1 "Installation aborted due to port conflict in non-interactive mode."
-                fi
-            else
-                log "SUCCESS" "Successfully freed port 40120"
-                echo -e "${green}Successfully freed port 40120${reset}"
-            fi
-            
-            return
-        fi
-
-        log "ERROR" "Port 40120 is in use and kill_txAdmin is not set to true"
-        cleanup_and_exit 1 "${red}${bold}ERROR:${reset} Port 40120 is already in use. Use --kill-port to force stop the running process."
-    fi
-    
-    log "DEBUG" "Port 40120 is available"
-}
-
-function checkDir(){
-    log "DEBUG" "Checking if directory $dir already exists"
-    
-    if [[ -e $dir ]]; then
-        log "WARN" "Directory $dir already exists"
-        
-        if [[ "${non_interactive}" == "false" ]]; then
-            if [[ "${delete_dir}" == "0" ]]; then
-                status "Directory already exists"
-                echo -e "${red}${bold}Directory conflict:${reset} The directory $dir already exists."
-                echo -e "${yellow}This could be an existing FiveM server or other files.${reset}"
-                
-                export OPTIONS=(
-                    "Remove everything in $dir" 
-                    "Exit script"
-                )
-                
-                bashSelect
-                
-                case $? in
-                    0 )
-                    delete_dir="true"
-                        log "INFO" "User chose to delete existing directory $dir"
-                    ;;
-                    1 )
-                        log "INFO" "User chose to exit due to directory conflict"
-                        cleanup_and_exit 0 "Installation cancelled due to directory conflict."
-                    ;;
-                esac
-            fi
-        fi
-        
-        if [[ "${delete_dir}" == "true" ]]; then
-            status "Removing existing directory"
-            
-            # Count number of files to be deleted
-            file_count=$(find "$dir" -type f | wc -l)
-            log "INFO" "Preparing to delete $file_count files in $dir"
-            
-            if [ $file_count -gt 1000 ]; then
-                log "WARN" "Large number of files ($file_count) to delete"
-                echo -e "${yellow}${bold}WARNING:${reset} About to delete a large number of files ($file_count)."
-                
-                if [[ "${non_interactive}" == "false" ]]; then
-                    echo -e "${red}${bold}This operation cannot be undone!${reset}"
-                    read -p "Are you absolutely sure? (yes/N): " confirm
-                    if [[ "$confirm" != "yes" ]]; then
-                        log "INFO" "User cancelled deletion of directory with many files"
-                        cleanup_and_exit 0 "Operation cancelled by user."
-                    fi
-                fi
-            fi
-            
-            echo -e "${yellow}Removing directory $dir...${reset}"
-            runCommand "rm -rf $dir" "Removing existing directory" 1 1
-            
-            # Verify directory was deleted
-            if [[ -e $dir ]]; then
-                log "ERROR" "Failed to delete directory $dir"
-                cleanup_and_exit 1 "${red}${bold}ERROR:${reset} Failed to delete directory $dir. Check permissions and try again."
-            else
-                log "SUCCESS" "Successfully removed directory $dir"
-                echo -e "${green}Directory successfully removed${reset}"
-            fi
-            
-            return
-        fi
-
-        log "ERROR" "Directory $dir exists and delete_dir is not set to true"
-        cleanup_and_exit 1 "${red}${bold}ERROR:${reset} Directory $dir already exists. Use --delete-dir to remove it."
-    fi
-    
-    log "DEBUG" "Directory $dir does not exist, it will be created"
-}
-
-function selectDeployment(){
-    if [[ "${txadmin_deployment}" == "0" ]]; then
-        txadmin_deployment="true"
-
-        if [[ "${non_interactive}" == "false" ]]; then
-            status "Select deployment type"
-            echo -e "${cyan}FiveM offers different ways to set up your server:${reset}"
-            echo -e "${blue}• TxAdmin:${reset} Web-based admin panel for easy server management (recommended)"
-            echo -e "${blue}• cfx-server-data:${reset} Basic setup without the admin panel (advanced)\n"
-            
-            export OPTIONS=(
-                "Install template via TxAdmin (recommended)" 
-                "Use cfx-server-data (advanced)" 
-                "Exit installation"
-            )
-            
-            bashSelect
-
-            case $? in
-                0 )
-                    txadmin_deployment="true"
-                    log "INFO" "Deployment type: TxAdmin"
-                    echo -e "${green}Selected:${reset} TxAdmin deployment"
-                    ;;
-                1 )
-                    txadmin_deployment="false"
-                    log "INFO" "Deployment type: cfx-server-data"
-                    echo -e "${green}Selected:${reset} cfx-server-data deployment"
-                    ;;
-                2 )
-                    log "INFO" "Installation cancelled by user at deployment selection"
-                    cleanup_and_exit 0 "${yellow}Installation cancelled by user.${reset}"
-                    ;;
-            esac
-        fi
-    fi
-    
-    if [[ "${txadmin_deployment}" == "false" ]]; then
-        log "INFO" "Setting up server with cfx-server-data"
-        echo -e "${blue}Setting up server with cfx-server-data...${reset}"
-        examServData
-    else
-        log "INFO" "Server will be configured using TxAdmin web interface"
-        echo -e "${blue}Server will be configured using TxAdmin web interface after installation${reset}"
-    fi
-}
-
-function createCrontab(){
-    if [[ "${crontab_autostart}" == "0" ]]; then
-        crontab_autostart="false"
-
-        if [[ "${non_interactive}" == "false" ]]; then
-            status "Automatic server startup"
-            echo -e "${cyan}Would you like the FiveM server to start automatically when the system boots?${reset}"
-            echo -e "${blue}This is recommended for production servers.${reset}"
-            
-            export OPTIONS=(
-                "Yes - Enable automatic startup (recommended)" 
-                "No - I'll start the server manually"
-            )
-            
-            bashSelect
-
-            if [[ $? == 0 ]]; then
-                crontab_autostart="true"
-                log "INFO" "Automatic startup enabled"
-                echo -e "${green}Automatic startup will be enabled${reset}"
-            else
-                log "INFO" "Automatic startup disabled"
-                echo -e "${yellow}Automatic startup will be disabled${reset}"
-            fi
-        fi
-    fi
-    
-    if [[ "${crontab_autostart}" == "true" ]]; then
-        status "Configuring automatic startup"
-        
-        # Create a more robust crontab entry with logging
-        crontab_content="@reboot root /bin/bash $dir/start.sh > $dir/autostart.log 2>&1"
-        
-        runCommand "echo \"$crontab_content\" > /etc/cron.d/fivem" "Configuring automatic startup via crontab" 1 0
-        runCommand "chmod 644 /etc/cron.d/fivem" "Setting proper permissions for crontab file" 1 0
-        
-        log "SUCCESS" "Crontab entry created for automatic startup"
-        echo -e "${green}✓ Automatic startup configured successfully${reset}"
-        echo -e "${blue}The server will start automatically on system boot${reset}"
-    else
-        log "INFO" "Skipping automatic startup configuration"
-        echo -e "${yellow}ℹ Automatic startup was not configured${reset}"
-        echo -e "${blue}To start the server manually, run:${reset} ${bold}sh $dir/start.sh${reset}"
-    fi
-}
-
-function installPma(){
-    if [[ "${non_interactive}" == "false" ]]; then
-        if [[ "${install_phpmyadmin}" == "0" ]]; then
-            status "Database Configuration"
-            echo -e "${cyan}FiveM can use a database to store persistent data.${reset}"
-            echo -e "${blue}You can install MariaDB/MySQL and phpMyAdmin, or use an existing database.${reset}\n"
-            
-            export OPTIONS=(
-                "Install MariaDB/MySQL and phpMyAdmin (recommended for new users)" 
-                "Use existing database" 
-                "Do not configure database"
-            )
-
-            bashSelect
-
-            case $? in
-                0 )
-                    install_phpmyadmin="true"
-                    existing_db_configured=false
-                    log "INFO" "phpMyAdmin installation enabled"
-                    echo -e "${green}MariaDB/MySQL and phpMyAdmin installation selected${reset}"
-                    ;;
-                1 )
-                    install_phpmyadmin="false"
-                    existing_db_configured=true
-                    log "INFO" "Existing database configuration selected"
-                    echo -e "${green}Existing database configuration selected${reset}"
-                    configureExistingDatabase
-                    ;;
-                2 )
-                    install_phpmyadmin="false"
-                    existing_db_configured=false
-                    log "INFO" "No database installation/configuration"
-                    echo -e "${yellow}No database will be configured${reset}"
-                    ;;
-            esac
-        fi
-    fi
-    
-    if [[ "${install_phpmyadmin}" == "true" ]]; then
-        log "INFO" "Installing phpMyAdmin and MariaDB"
-        echo -e "\n${bold}${yellow}Installing MariaDB 11.4 and phpMyAdmin...${reset}"
-        echo -e "${blue}This process may take several minutes. Please wait...${reset}\n"
-        
-        # Show progress during installation by not hiding output
-        runCommand "bash <(curl -s https://raw.githubusercontent.com/Dolyyyy/fiveminstaller/refs/heads/main/phpmyadmin.sh) -s ${pma_options[*]}" "Installing phpMyAdmin and MariaDB/MySQL" 0 1
-        
-        echo -e "\n${green}✓ MariaDB and phpMyAdmin installation completed!${reset}"
-    fi
-}
-
-# Function to configure an existing database
-function configureExistingDatabase() {
-    log "INFO" "Configuring connection to existing database"
-    echo -e "${blue}Please provide connection information for your existing database.${reset}"
-    echo -e "${yellow}This information will be used to configure your FiveM server.${reset}\n"
-    
-    read -p "Database host [localhost]: " input_db_host
-    existing_db_host=${input_db_host:-"localhost"}
-    
-    read -p "Database name [fivem]: " input_db_name
-    existing_db_name=${input_db_name:-"fivem"}
-    
-    read -p "Database user [fivem]: " input_db_user
-    existing_db_user=${input_db_user:-"fivem"}
-    
-    read -p "Database password: " input_db_password
-    existing_db_password=${input_db_password}
-    
-    # Connection verification if possible
-    if command -v mysql &> /dev/null; then
-        log "INFO" "Attempting to verify database connection"
-        echo -e "${blue}Verifying database connection...${reset}"
-        
-        if mysql -h "$existing_db_host" -u "$existing_db_user" -p"$existing_db_password" "$existing_db_name" -e "SELECT 1" &>/dev/null; then
-            log "SUCCESS" "Database connection successful"
-            echo -e "${green}✓ Database connection successful!${reset}"
+        # Test connection first
+        if mysql -h"$existing_db_host" -u"$existing_db_user" -p"$existing_db_password" -e "SELECT 1;" 2>/dev/null; then
+            # Create database if it doesn't exist
+            mysql -h"$existing_db_host" -u"$existing_db_user" -p"$existing_db_password" -e "CREATE DATABASE IF NOT EXISTS $existing_db_name;" 2>/dev/null
+            log "SUCCESS" "FiveM database ready with existing configuration"
         else
-            log "WARN" "Unable to connect to database with provided information"
-            echo -e "${yellow}⚠ Unable to verify database connection.${reset}"
-            echo -e "${yellow}The information will still be saved, but you'll need to verify the configuration manually.${reset}"
-            
-            # Give user the option to retry
-            read -p "Do you want to try again? (Y/n): " retry
-            if [[ "$retry" != "n" && "$retry" != "N" ]]; then
-                configureExistingDatabase
-                return
-            fi
+            log "ERROR" "Cannot connect to existing database"
+            return 1
         fi
+    elif [[ "$install_phpmyadmin" == "true" ]] && [[ -n "$rootPasswordMariaDB" ]]; then
+        log "INFO" "Creating FiveM database with installed MariaDB"
+        
+        # Create fivem database
+        runCommand "mariadb -u root -p${rootPasswordMariaDB} -e \"CREATE DATABASE IF NOT EXISTS fivem;\"" "Creating FiveM database" 1 0
+        log "SUCCESS" "FiveM database created successfully"
     else
-        log "INFO" "MySQL client not available, unable to verify connection"
-        echo -e "${yellow}MySQL client not available to verify connection.${reset}"
-        echo -e "${yellow}The information will be saved, but you'll need to verify the connection manually.${reset}"
+        log "INFO" "No database configuration - skipping database creation"
     fi
-    
-    log "INFO" "Existing database information configured"
-    echo -e "${green}Database information saved:${reset}"
-    echo -e "  ${blue}Host:${reset} $existing_db_host"
-    echo -e "  ${blue}Database:${reset} $existing_db_name"
-    echo -e "  ${blue}User:${reset} $existing_db_user"
-    echo -e "  ${blue}Password:${reset} $(echo "$existing_db_password" | sed 's/./*/g')"
 }
 
-function install(){
-    log "INFO" "Starting FiveM installation"
+# Function to create installation info file
+create_installation_info() {
+    local install_dir=$1
     
-    # Banner
-    echo -e "\n${cyan}╔═══════════════════════════════════════════════════════════════════════╗${reset}"
-    echo -e "${cyan}║ ${bold}${green}                     FIVEM SERVER INSTALLER                          ${reset}${cyan}║${reset}"
-    echo -e "${cyan}║ ${reset}${blue}                      Version: $script_version                        ${reset}${cyan}║${reset}"
-    echo -e "${cyan}╚═══════════════════════════════════════════════════════════════════════╝${reset}\n"
+    log "INFO" "Creating installation information file"
     
-    # Create log file
-    > $LOG_FILE
+    local info_file="$install_dir/installation_info.txt"
+    local server_ip=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}' || echo "Unknown")
     
-    # System checks and information gathering
-    gather_system_info
-    
-    # Install required packages
-    echo -e "\n${bold}${yellow}Installing required packages...${reset}"
-    runCommand "apt update -y" "Updating package repository" 1 0
-    
-    local required_packages="wget git curl dos2unix net-tools sed screen xz-utils lsof iproute2 ca-certificates"
-    
-    # Check which required packages are already installed
-    local packages_to_install=""
-    for package in $required_packages; do
-        if ! dpkg -l | grep -q "ii  $package "; then
-            packages_to_install="$packages_to_install $package"
-        fi
-    done
-    
-    if [ -n "$packages_to_install" ]; then
-        log "INFO" "Installing required packages: $packages_to_install"
-        runCommand "apt install -y $packages_to_install" "Installing necessary packages" 1 1
+    cat > "$info_file" << EOF
+===============================================
+     FIVEM SERVER INSTALLATION COMPLETE
+===============================================
+
+Installation Date: $(date)
+Installation Directory: $install_dir
+Server IP: $server_ip
+
+===============================================
+          SERVER INFORMATION
+===============================================
+
+FiveM Server Port: 30120
+Connection String: connect $server_ip:30120
+
+Configuration Files:
+- Server Config: $install_dir/server.cfg
+- Permissions: $install_dir/permissions.cfg
+
+Server Commands:
+- Start Server: cd $install_dir && ./run.sh +exec server.cfg
+- Console Access: Use txAdmin or direct console
+
+===============================================
+          DATABASE INFORMATION
+===============================================
+
+EOF
+
+    # Add database information based on configuration
+    if [[ "$existing_db_configured" == "true" ]]; then
+        cat >> "$info_file" << EOF
+Database Type: Existing Database
+Host: $existing_db_host
+Database: $existing_db_name
+User: $existing_db_user
+Password: [Hidden for security]
+
+Connection String for server.cfg:
+set mysql_connection_string "server=$existing_db_host;uid=$existing_db_user;password=$existing_db_password;database=$existing_db_name;port=3306;"
+EOF
+    elif [[ "$install_phpmyadmin" == "true" ]]; then
+        cat >> "$info_file" << EOF
+Database Type: MariaDB 11.4 (Installed)
+Host: localhost
+Database: fivem
+User: root
+Password: $rootPasswordMariaDB
+
+phpMyAdmin Access:
+URL: http://$server_ip/phpmyadmin/
+User: root  
+Password: $rootPasswordMariaDB
+
+Connection String for server.cfg:
+set mysql_connection_string "server=localhost;uid=root;password=$rootPasswordMariaDB;database=fivem;port=3306;"
+EOF
     else
-        log "INFO" "All required packages are already installed"
-        echo -e "${green}✓ All required packages are already installed${reset}"
+        cat >> "$info_file" << EOF
+Database: Not configured
+Note: You can configure database manually later if needed.
+EOF
     fi
-    
-    # Choose the installation path
-    choose_installation_path
-    
-    # Run pre-installation checks
-    checkPort
-    checkDir
-    selectDeployment
-    selectVersion
-    createCrontab
-    installPma
 
-    # Create server directory
-    echo -e "\n${bold}${yellow}Setting up FiveM server environment...${reset}"
-    runCommand "mkdir -p $dir/server" "Creating server directories" 1 1
-    runCommand "cd $dir/server/" "Navigating to server directory" 1 0
+    cat >> "$info_file" << EOF
 
-    # Download FiveM server
-    echo -e "\n${bold}${yellow}Downloading FiveM server files...${reset}"
-    log "INFO" "Downloading FxServer from $artifacts_version"
+===============================================
+          IMPORTANT NOTES
+===============================================
+
+1. REQUIRED: Get your license key from https://keymaster.fivem.net/
+   Edit $install_dir/server.cfg and add your license key.
+
+2. Configure your server hostname and description in server.cfg
+
+3. Add admin permissions in permissions.cfg using your identifiers
+
+4. If using txAdmin, it will create its own configuration
+
+5. Make sure to open port 30120 (TCP/UDP) in your firewall
+
+===============================================
+          NEXT STEPS
+===============================================
+
+1. Get your license key and add it to server.cfg
+2. Configure server settings in server.cfg  
+3. Add admin permissions in permissions.cfg
+4. Start your server: cd $install_dir && ./run.sh +exec server.cfg
+
+===============================================
+          SUPPORT & DOCUMENTATION
+===============================================
+
+FiveM Documentation: https://docs.fivem.net/
+FiveM Forum: https://forum.cfx.re/
+FiveM Discord: https://discord.gg/fivem
+
+Log file: $LOG_FILE
+
+===============================================
+EOF
+
+    chmod 644 "$info_file"
+    log "SUCCESS" "Installation information saved to $info_file"
+    echo -e "${green}✓ Installation information saved to:${reset} $info_file"
+}
+
+# Function to create management scripts
+create_management_scripts() {
+    local install_dir=$1
     
-    # Download with progress bar
-    echo -e "${blue}Downloading FxServer...${reset}"
-    
-    # Use wget with progress bar but log to file
-    wget_log=$(mktemp)
-    wget --progress=bar:force:noscroll \
-         --show-progress \
-         -O "$dir/server/fx.tar.xz" \
-         "$artifacts_version" 2>&1 | tee "$wget_log"
-         
-    # Check if download was successful
-    if [ ! -f "$dir/server/fx.tar.xz" ] || [ ! -s "$dir/server/fx.tar.xz" ]; then
-        cat "$wget_log" >> "$LOG_FILE"
-        rm -f "$wget_log"
-        log "ERROR" "Failed to download FxServer from $artifacts_version"
-        cleanup_and_exit 1 "${red}${bold}ERROR:${reset} Failed to download FxServer. Check the log for details: $LOG_FILE"
-    fi
-    
-    rm -f "$wget_log"
-    log "SUCCESS" "Successfully downloaded FxServer"
-    
-    # Extract the server files
-    echo -e "${blue}Extracting FxServer archive...${reset}"
-    runCommand "tar xf $dir/server/fx.tar.xz -C $dir/server/" "Extracting FxServer archive" 1 1
-    runCommand "rm $dir/server/fx.tar.xz" "Removing downloaded archive" 1 0
-    
-    # Create management scripts
-    echo -e "\n${bold}${yellow}Creating management scripts...${reset}"
-    log "INFO" "Creating start, stop and access scripts"
+    log "INFO" "Creating management scripts"
     
     # Create start script
-    cat << EOF > $dir/start.sh
+    cat > "$install_dir/start.sh" << EOF
 #!/bin/bash
 # FiveM Server Starter Script
 # Created by FiveM Server Installer v${script_version}
-# https://github.com/Dolyyyy/fiveminstaller
 
 # Colors
 red="\e[0;91m"
@@ -1065,12 +1332,9 @@ echo -e "\${cyan}╚════════════════════
 port=\$(lsof -Pi :40120 -sTCP:LISTEN -t)
 if [ -z "\$port" ]; then
     echo -e "\${blue}Starting TxAdmin...\${reset}"
-    # Check for updates before starting (optional)
-    # echo -e "\${yellow}Checking for FiveM updates...\${reset}"
-    # cd $dir && bash <(curl -s https://raw.githubusercontent.com/Dolyyyy/fiveminstaller/refs/heads/main/setup.sh) -u $dir
     
     # Start the server
-    screen -dmS fivem sh $dir/server/run.sh
+    screen -dmS fivem sh $install_dir/run.sh
     
     # Wait for server to start
     echo -e "\${yellow}Waiting for TxAdmin to start...\${reset}"
@@ -1088,14 +1352,14 @@ else
     echo -e "\n\${red}The default \${reset}\${bold}TxAdmin\${reset}\${red} port is already in use -> Is a \${reset}\${bold}FiveM Server\${reset}\${red} already running?\${reset}"
 fi
 EOF
-    runCommand "chmod +x $dir/start.sh" "Making the start script executable" 1 0
 
-    # Create attach script with a more informative header
-    cat << EOF > $dir/attach.sh
+    chmod +x "$install_dir/start.sh"
+    
+    # Create attach script
+    cat > "$install_dir/attach.sh" << EOF
 #!/bin/bash
 # FiveM Server Console Access
 # Created by FiveM Server Installer v${script_version}
-# https://github.com/Dolyyyy/fiveminstaller
 
 # Colors
 red="\e[0;91m"
@@ -1108,14 +1372,14 @@ echo -e "\${red}Press \${bold}Ctrl+A\${reset} \${red}then \${bold}D\${reset} \${
 sleep 2
 screen -xS fivem
 EOF
-    runCommand "chmod +x $dir/attach.sh" "Making the attach script executable" 1 0
-
-    # Create stop script with confirmation
-    cat << EOF > $dir/stop.sh
+    
+    chmod +x "$install_dir/attach.sh"
+    
+    # Create stop script
+    cat > "$install_dir/stop.sh" << EOF
 #!/bin/bash
-# FiveM Server Stop Script
+# FiveM Server Stop Script  
 # Created by FiveM Server Installer v${script_version}
-# https://github.com/Dolyyyy/fiveminstaller
 
 # Colors
 red="\e[0;91m"
@@ -1142,591 +1406,742 @@ else
     echo -e "\${green}Operation canceled. Server continues running.\${reset}"
 fi
 EOF
-    runCommand "chmod +x $dir/stop.sh" "Making the stop script executable" 1 0
     
-    # Create update script for easy updates
-    cat << EOF > $dir/update.sh
-#!/bin/bash
-# FiveM Server Update Script
-# Created by FiveM Server Installer v${script_version}
-# https://github.com/Dolyyyy/fiveminstaller
-
-# Colors
-red="\e[0;91m"
-green="\e[0;92m"
-yellow="\e[0;93m"
-bold="\e[1m"
-reset="\e[0m"
-
-echo -e "\${yellow}This script will update your FiveM server to the latest version.\${reset}"
-echo -e "\${red}WARNING: \${bold}The server will be stopped if it's running!\${reset}"
-read -p "Continue? (y/N): " -n 1 -r
-echo
-
-if [[ \$REPLY =~ ^[Yy]\$ ]]; then
-    # Check if server is running and stop it
-    if screen -list | grep -q "fivem"; then
-        echo -e "\${yellow}Stopping FiveM server...\${reset}"
-        screen -XS fivem quit
-        sleep 2
-    fi
+    chmod +x "$install_dir/stop.sh"
     
-    # Run the updater
-    echo -e "\${green}Starting update process...\${reset}"
-    bash <(curl -s https://raw.githubusercontent.com/Dolyyyy/fiveminstaller/refs/heads/main/setup.sh) -u $dir
-fi
-EOF
-    runCommand "chmod +x $dir/update.sh" "Creating update script" 1 0
+    log "SUCCESS" "Management scripts created"
+}
 
-    # Check if port 40120 is free to launch TxAdmin
-    port=$(lsof -Pi :40120 -sTCP:LISTEN -t)
-
-    if [[ -z "$port" ]]; then
-        log "INFO" "Starting TxAdmin for first-time setup"
-        echo -e "\n${bold}${yellow}Starting TxAdmin for first-time setup...${reset}"
-
-        # Clean up existing log file
-        if [[ -e '/tmp/fivem.log' ]]; then
-            rm /tmp/fivem.log
+# Function to setup txAdmin if requested
+setup_txadmin() {
+    local install_dir=$1
+    
+    if [[ "$txadmin_deployment" == "1" ]]; then
+        status "Setting up txAdmin"
+        log "INFO" "Configuring txAdmin deployment"
+        
+        # Check if FiveM run.sh exists
+        if [[ ! -f "$install_dir/run.sh" ]]; then
+            log "ERROR" "FiveM run.sh not found in $install_dir"
+            echo -e "${red}✗ FiveM run.sh not found, txAdmin setup skipped${reset}"
+            export TXADMIN_PIN="not_available"
+            return 1
         fi
         
-        # Prepare a file for screen output
-        touch /tmp/fivem_screen.txt
-        chmod 666 /tmp/fivem_screen.txt
+        # Start txAdmin in screen session to capture PIN
+        log "INFO" "Starting txAdmin in screen session for PIN capture"
+        cd "$install_dir"
         
-        # Start TxAdmin in a screen session
-        log "INFO" "Starting TxAdmin"
-        screen -dmS fivem $dir/server/run.sh
-
-        # Wait for TxAdmin to start
-        echo -e "${blue}Waiting for TxAdmin to start...${reset}"
-        local max_attempts=60
-        local started=false
+        # Kill any existing screen session
+        screen -S fivem -X quit 2>/dev/null || true
+        sleep 2
         
-        for ((i=1; i<=max_attempts; i++)); do
-            # Use direct screen capture to check if server is started
-            screen -S fivem -X hardcopy /tmp/fivem_screen.txt
-            if grep -q "All ready! Please access" /tmp/fivem_screen.txt 2>/dev/null; then
-                started=true
+        # Start txAdmin
+        log "INFO" "Starting screen session with FiveM run.sh"
+        screen -dmS fivem sh "$install_dir/run.sh"
+        
+        # Wait for screen session to be created
+        sleep 3
+        
+        # Check if screen session was created
+        local session_created=false
+        local attempts=0
+        local max_attempts=10
+        
+        while [ $attempts -lt $max_attempts ]; do
+            if screen -list | grep -q "fivem"; then
+                session_created=true
+                log "INFO" "Screen session 'fivem' created successfully"
                 break
             fi
-            printf "."
             sleep 1
+            attempts=$((attempts + 1))
         done
-
-        echo
         
-        if [ "$started" = true ]; then
-            log "SUCCESS" "TxAdmin started successfully"
+        if [ "$session_created" = false ]; then
+            log "ERROR" "Failed to create screen session"
+            echo -e "${red}✗ Failed to create screen session for txAdmin${reset}"
+            export TXADMIN_PIN="session_failed"
+            cd - > /dev/null
+            return 1
+        fi
+        
+        # Wait for txAdmin to start and display PIN
+        log "INFO" "Waiting for txAdmin to start and display PIN..."
+        sleep 15
+        
+        # Multiple attempts to capture PIN
+        local pin=""
+        local capture_attempts=0
+        local max_capture_attempts=5
+        
+        while [ $capture_attempts -lt $max_capture_attempts ] && [ -z "$pin" ]; do
+            log "INFO" "PIN capture attempt $((capture_attempts + 1))/$max_capture_attempts"
             
-            # Direct PIN capture method
-            log "INFO" "Capturing PIN directly from screen"
+            # Capture screen content
+            screen -S fivem -X hardcopy /tmp/fivem_screen_$capture_attempts.txt
             
-            # Wait 3 seconds to ensure PIN is fully displayed
-            sleep 3
-            
-            # Capture screen content again to get the PIN
-            screen -S fivem -X hardcopy /tmp/fivem_screen.txt
-            
-            # Debug: Log what we've captured
-            log "DEBUG" "Captured screen content:"
-            cat /tmp/fivem_screen.txt >> "$LOG_FILE"
-            
-            # Extract PIN using pattern that matches the exact format in the screen
-            pin=$(grep -A 1 "Use the PIN below to register" /tmp/fivem_screen.txt | tail -1 | grep -oE "[0-9]{4}")
-            
-            if [ -z "$pin" ]; then
-                # Try different pattern
-                pin=$(grep -E "┃\s*[0-9]{4}\s*┃" /tmp/fivem_screen.txt | grep -oE "[0-9]{4}")
-            fi
-            
-            # If still no PIN, try generic number extraction near the word PIN
-            if [ -z "$pin" ]; then
-                # Get 5 lines after PIN text
-                start_line=$(grep -n "Use the PIN below to register" /tmp/fivem_screen.txt | cut -d: -f1)
-                if [ -n "$start_line" ]; then
-                    pin=$(sed -n "$((start_line)),$((start_line+5))p" /tmp/fivem_screen.txt | grep -oE "[0-9]{4}" | head -1)
+            if [ -f "/tmp/fivem_screen_$capture_attempts.txt" ]; then
+                # Debug: Log what we've captured
+                log "DEBUG" "Captured screen content (attempt $((capture_attempts + 1))):"
+                cat /tmp/fivem_screen_$capture_attempts.txt >> "$LOG_FILE"
+                
+                # Try multiple PIN extraction methods
+                # Method 1: Look for "Use the PIN below to register"
+                pin=$(grep -A 3 "Use the PIN below to register" /tmp/fivem_screen_$capture_attempts.txt | grep -oE "[0-9]{4}" | head -1)
+                
+                # Method 2: Look for boxed PIN format
+                if [ -z "$pin" ]; then
+                    pin=$(grep -E "┃\s*[0-9]{4}\s*┃" /tmp/fivem_screen_$capture_attempts.txt | grep -oE "[0-9]{4}" | head -1)
                 fi
-            fi
-            
-            # Final fallback
-            if [ -z "$pin" ]; then
-                # Look for lines containing "PIN" and find nearby 4-digit numbers
-                pin_line=$(grep -n -i "pin" /tmp/fivem_screen.txt | tail -1 | cut -d: -f1)
-                if [ -n "$pin_line" ]; then
-                    # Search 5 lines before and after PIN mention
-                    start_search=$((pin_line > 5 ? pin_line - 5 : 1))
-                    end_search=$((pin_line + 5))
-                    pin=$(sed -n "${start_search},${end_search}p" /tmp/fivem_screen.txt | grep -oE "[0-9]{4}" | head -1)
+                
+                # Method 3: Look for PIN in context
+                if [ -z "$pin" ]; then
+                    pin=$(grep -i -A 5 -B 5 "pin" /tmp/fivem_screen_$capture_attempts.txt | grep -oE "[0-9]{4}" | head -1)
                 fi
-            fi
-            
-            # Absolute fallback - just find any 4-digit number in the whole screen
-            if [ -z "$pin" ]; then
-                pin=$(grep -oE "[0-9]{4}" /tmp/fivem_screen.txt | head -1)
-            fi
-            
-            # Validate PIN format
-            if [[ "$pin" =~ ^[0-9]{4}$ ]]; then
-                log "INFO" "PIN extracted successfully: $pin"
+                
+                # Method 4: Look for any 4-digit number
+                if [ -z "$pin" ]; then
+                    pin=$(grep -oE "[0-9]{4}" /tmp/fivem_screen_$capture_attempts.txt | head -1)
+                fi
+                
+                # Method 5: Look for txAdmin specific patterns
+                if [ -z "$pin" ]; then
+                    pin=$(grep -E "(PIN|pin|Pin).*[0-9]{4}" /tmp/fivem_screen_$capture_attempts.txt | grep -oE "[0-9]{4}" | head -1)
+                fi
+                
+                if [[ "$pin" =~ ^[0-9]{4}$ ]]; then
+                    log "INFO" "PIN extracted successfully: $pin"
+                    break
+                fi
             else
-                # If all fails, just do a full dump for debugging
-                log "WARN" "Could not extract valid 4-digit PIN. Dumping screen content:"
-                cat /tmp/fivem_screen.txt >> "$LOG_FILE"
-                pin="unknown"
+                log "WARN" "Failed to capture screen content"
             fi
             
-            # Get the server IP address and TxAdmin URL
-            server_ip=$(ip route get 1.1.1.1 | awk '{print $7; exit}')
-            txadmin="http://${server_ip}:40120"
-            
-            # Display server information
-            clear
-            echo -e "\n${cyan}╔═══════════════════════════════════════════════════════════════════════╗${reset}"
-            echo -e "${cyan}║ ${bold}${green}                    FIVEM SERVER INSTALLED                         ${reset}${cyan}║${reset}"
-            echo -e "${cyan}╚═══════════════════════════════════════════════════════════════════════╝${reset}\n"
-            
-            echo -e "${green}${bold}TxAdmin${reset}${green} was started successfully!${reset}"
-            
-            echo -e "\n${bold}${yellow}SERVER INFORMATION${reset}"
-            echo -e "${blue}TxAdmin Web Interface:${reset} ${bold}${txadmin}${reset}"
-            echo -e "${blue}Initial PIN:${reset} ${bold}${pin}${reset} (use it in the next 5 minutes!)"
-            echo -e "${blue}Server Data Path:${reset} ${bold}$dir/server-data${reset}"
-            
-            echo -e "\n${bold}${yellow}MANAGEMENT COMMANDS${reset} ${cyan}(via SSH)${reset}"
-            echo -e "${blue}Start Server:${reset}   ${bold}sh $dir/start.sh${reset}"
-            echo -e "${blue}Stop Server:${reset}    ${bold}sh $dir/stop.sh${reset}"
-            echo -e "${blue}View Console:${reset}   ${bold}sh $dir/attach.sh${reset}"
-            echo -e "${blue}Update Server:${reset}  ${bold}sh $dir/update.sh${reset}"
-
-            if [[ "$install_phpmyadmin" == "true" ]]; then
-                echo -e "\n${bold}${yellow}DATABASE INFORMATION${reset}"
-                # Get database credentials from MariaDB files
-                if [ -f "/root/.mariadbPhpma" ]; then
-                    runCommand "cat /root/.mariadbPhpma" "Reading MariaDB login information" 1 0
-                    runCommand "rm /root/.mariadbPhpma" "Removing temporary MariaDB file" 1 0
-                fi
-                
-                rootPasswordMariaDB=""
-                if [ -f "/root/.mariadbRoot" ]; then
-                    rootPasswordMariaDB=$( cat /root/.mariadbRoot )
-                    rm /root/.mariadbRoot
-                fi
-                
-                # Create FiveM database with root user access
-                if [ -n "$rootPasswordMariaDB" ]; then
-                    mariadb -u root -p$rootPasswordMariaDB -e "CREATE DATABASE IF NOT EXISTS fivem;"
-                    
-                    echo -e "${blue}Database Name:${reset} ${bold}fivem${reset}"
-                    echo -e "${blue}Database User:${reset} ${bold}root${reset}"
-                    echo -e "${blue}Database Password:${reset} ${bold}${rootPasswordMariaDB}${reset}"
-                    echo -e "${blue}MySQL Connection String:${reset}"
-                    echo -e "${bold}set mysql_connection_string \"server=127.0.0.1;database=fivem;userid=root;password=${rootPasswordMariaDB}\"${reset}"
-                    
-                    if [ -f "/root/.PHPma" ]; then
-                        runCommand "cat /root/.PHPma" "Reading phpMyAdmin information" 1 0
-                    fi
-                else
-                    log "WARN" "Could not retrieve root MariaDB password"
-                    echo -e "${yellow}Note: Could not configure the FiveM database automatically.${reset}"
-                    echo -e "${yellow}You may need to set up the database manually.${reset}"
-                fi
-            fi
-            
-            # Create installation info file
-            create_installation_info
-            
-            # Clean up temporary files
-            rm -f /tmp/fivem_screen.txt
-            
-            echo -e "\n${bold}${green}Installation information has been saved to:${reset} $dir/installation_info.txt"
-            echo -e "${yellow}Please save this information for future reference!${reset}\n"
-        else
-            log "ERROR" "TxAdmin did not start in the expected time"
-            
-            # Clean up temporary files
-            rm -f /tmp/fivem_screen.txt
-            
-            echo -e "${red}${bold}WARNING:${reset} TxAdmin did not start in the expected time."
-            echo -e "${yellow}You may need to manually start it using:${reset} ${bold}sh $dir/start.sh${reset}"
-            echo -e "${yellow}Check the logs for more information:${reset} ${bold}less /tmp/fivem_screen.txt${reset}"
-        fi
-    else
-        log "ERROR" "TxAdmin port 40120 is already in use"
-        echo -e "\n${red}${bold}ERROR:${reset} The default ${bold}TxAdmin${reset} port (40120) is already in use."
-        echo -e "${yellow}This could indicate that a FiveM server is already running.${reset}"
-        echo -e "${yellow}Please stop any existing FiveM servers or change the port and try again.${reset}"
-        
-        # Save basic installation info even if TxAdmin didn't start
-        create_installation_info
-    fi
-}
-
-# Function to create the installation info file
-create_installation_info() {
-    log "INFO" "Creating installation information file"
-    
-    # Create the info file with a nice format
-    cat << EOF > $dir/installation_info.txt
-┌───────────────────────────────────────────────────────────────────────┐
-│                        FIVEM SERVER INFORMATION                        │
-└───────────────────────────────────────────────────────────────────────┘
-
-▶ INSTALLATION DETAILS
-  • Date: $(date "+%Y-%m-%d %H:%M:%S")
-  • Host: $(hostname)
-  • IP Address: $(ip route get 1.1.1.1 | awk '{print $7; exit}')
-  • Path: $dir
-
-▶ SERVER ACCESS
-  • TxAdmin Web Interface: ${txadmin}
-  • Initial Pin: ${pin} (use it in the next 5 minutes!)
-  • TxAdmin Port: 40120
-  • Default Game Port: 30120
-
-▶ MANAGEMENT SCRIPTS
-  • Start Server: sh $dir/start.sh
-  • Stop Server: sh $dir/stop.sh
-  • View Console: sh $dir/attach.sh
-  • Update Server: sh $dir/update.sh
-
-▶ SERVER FILES
-  • Server Data: $dir/server-data
-  • Server Configuration: $dir/server-data/server.cfg
-  • Log File: $LOG_FILE
-
-▶ SYSTEM INFORMATION
-  • OS: $SYS_OS
-  • Kernel: $SYS_KERNEL
-  • CPU: $SYS_CPU ($SYS_CPU_CORES cores)
-  • RAM: $SYS_MEM_TOTAL ($SYS_MEM_FREE free)
-  • Disk Space: $SYS_DISK_TOTAL ($SYS_DISK_FREE available)
-
-EOF
-
-    if [[ "$install_phpmyadmin" == "true" ]]; then
-        cat << EOF >> $dir/installation_info.txt
-▶ DATABASE INFORMATION
-  • Database Type: MariaDB/MySQL (Installed with this script)
-  • Database Name: fivem
-  • Database User: root
-  • Database Password: ${rootPasswordMariaDB}
-  • MySQL Connection String:
-    set mysql_connection_string "server=127.0.0.1;database=fivem;userid=root;password=${rootPasswordMariaDB}"
-  • phpMyAdmin: http://$(ip route get 1.1.1.1 | awk '{print $7; exit}')/phpmyadmin
-
-EOF
-    elif [[ "$existing_db_configured" == "true" ]]; then
-        cat << EOF >> $dir/installation_info.txt
-▶ DATABASE INFORMATION
-  • Database Type: MariaDB/MySQL (External/Pre-existing)
-  • Database Host: $existing_db_host
-  • Database Name: $existing_db_name
-  • Database User: $existing_db_user
-  • Database Password: $existing_db_password
-  • MySQL Connection String:
-    set mysql_connection_string "server=$existing_db_host;database=$existing_db_name;userid=$existing_db_user;password=$existing_db_password"
-
-EOF
-    fi
-
-    cat << EOF >> $dir/installation_info.txt
-▶ SUPPORT & RESOURCES
-  • Installation Script: https://github.com/Dolyyyy/fiveminstaller
-  • FiveM Documentation: https://docs.fivem.net/
-  • Support Forum: https://forum.cfx.re/
-  • Creator's GitHub: https://github.com/Dolyyyy
-
-┌───────────────────────────────────────────────────────────────────────┐
-│      ♦ Thank you for using Dolyyyy's FiveM Server Installer! ♦        │
-└───────────────────────────────────────────────────────────────────────┘
-EOF
-
-    # Set proper permissions
-    chmod 644 "$dir/installation_info.txt"
-    
-    log "INFO" "Installation information has been saved to $dir/installation_info.txt"
-}
-
-function update() {
-    log "INFO" "Updating FiveM"
-    selectVersion
-
-    if [[ "${non_interactive}" == "false" ]]; then
-        status "Select the alpine directory"
-        readarray -t directories <<<$(find / -name "alpine")
-        export OPTIONS=(${directories[*]})
-
-        bashSelect
-
-        dir=${directories[$?]}/..
-        log "INFO" "Selected directory: $dir"
-    else
-        if [[ "$update_artifacts" == false ]]; then
-            log "ERROR" "Directory must be specified in non-interactive mode using --update <path>."
-            exit 1
-        fi
-        dir=$update_artifacts
-        log "INFO" "Using specified directory: $dir"
-    fi
-
-    checkPort
-
-    runCommand "rm -rf $dir/alpine" "Removing alpine directory"
-    runCommand "rm -f $dir/run.sh" "Removing run.sh file"
-    runCommand "wget --directory-prefix=$dir $artifacts_version" "Downloading fx.tar.xz"
-    log "INFO" "Download successful"
-    runCommand "tar xf $dir/fx.tar.xz -C $dir" "Extracting fx.tar.xz"
-    log "INFO" "Extraction successful"
-    runCommand "rm -r $dir/fx.tar.xz" "Removing fx.tar.xz"
-    clear
-    log "INFO" "Update successful"
-    echo "${green}Update successful${reset}"
-    exit 0
-}
-
-function main(){
-    # Initialize log file and set up logging
-    setup_logging
-    
-    # Display welcome banner
-    echo -e "\n${cyan}╔═══════════════════════════════════════════════════════════════════════════════╗${reset}"
-    echo -e "${cyan}║ ${bold}${green}                      FIVEM SERVER INSTALLER                            ${reset}${cyan}║${reset}"
-    echo -e "${cyan}║ ${reset}${blue}                          Version: $script_version                           ${reset}${cyan}║${reset}"
-    echo -e "${cyan}║ ${reset}${yellow}            https://github.com/Dolyyyy/fiveminstaller                 ${reset}${cyan}║${reset}"
-    echo -e "${cyan}╚═══════════════════════════════════════════════════════════════════════════════╝${reset}\n"
-    
-    log "INFO" "Starting FiveM Server Installer v$script_version"
-    
-    # Check for curl
-    if ! command -v curl &> /dev/null; then
-        log "WARN" "curl is not installed, installing now..."
-        apt update -y && apt -y install curl
-    fi
-    
-    # Gather basic system information
-    log "INFO" "Running on: $(uname -a)"
-    log "INFO" "Detected IP: $(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}' || echo 'unknown')"
-
-    if [[ "${non_interactive}" == "false" ]]; then
-        log "INFO" "Interactive mode enabled"
-        
-        # Source BashSelect from GitHub
-        if ! source <(curl -s https://raw.githubusercontent.com/Dolyyyy/fiveminstaller/refs/heads/main/bashselect.sh); then
-            log "ERROR" "Failed to source BashSelect script"
-            echo -e "${red}${bold}ERROR:${reset} Failed to source the BashSelect script. Check your internet connection."
-            exit 1
-        fi
-        
-        if [[ "${update_artifacts}" == "false" ]]; then
-            status "What would you like to do?"
-            
-            export OPTIONS=(
-                "Install a new FiveM server" 
-                "Update an existing FiveM server" 
-                "Exit without making changes"
-            )
-            
-            bashSelect
-
-            case $? in
-                0 )
-                    log "INFO" "User selected: Install a new FiveM server"
-                    install
-                    ;;
-                1 )
-                    log "INFO" "User selected: Update an existing FiveM server"
-                    update
-                    ;;
-                2 )
-                    log "INFO" "User selected: Exit without making changes"
-                    cleanup_and_exit 0 "${green}Exiting without making changes. Goodbye!${reset}"
-                    ;;
-            esac
-        else
-            log "INFO" "Update flag detected, running update process"
-            update
-        fi
-        
-        # If we got here, we've completed the requested action
-        log "INFO" "Operation completed successfully"
-        cleanup_and_exit 0 "${green}${bold}Operation completed successfully!${reset}"
-    else
-        log "INFO" "Non-interactive mode enabled"
-    
-    if [[ "${update_artifacts}" == "false" ]]; then
-            log "INFO" "Running installation in non-interactive mode"
-        install
-    else
-            log "INFO" "Running update in non-interactive mode"
-        update
-        fi
-        
-        # If we got here, we've completed the requested action
-        log "INFO" "Non-interactive operation completed successfully"
-        cleanup_and_exit 0 "${green}${bold}Operation completed successfully!${reset}"
-    fi
-}
-
-while [[ "$#" -gt 0 ]]; do
-    case $1 in
-        -h|--help)
-            echo -e "${bold}Usage: bash <(curl -s https://raw.githubusercontent.com/Dolyyyy/fiveminstaller/refs/heads/main/setup.sh) [OPTIONS]${reset}"
-            echo "Options:"
-            echo "  -h, --help                      Display this help message."
-            echo "      --non-interactive           Skip all interactive prompts by providing all required inputs as options."
-            echo "                                  If --phpmyadmin is included, you must also choose between --simple or --security."
-            echo "                                      When using --security, you must provide both --db_user and --db_password."
-            echo "  -v, --version <URL|latest>      Choose an artifacts version."
-            echo "                                  Default: latest"
-            echo "  -u, --update <path>             Update the artifacts version and specify the directory."
-            echo "                                  Use -v or --version to specify the version or it will use the latest version."
-            echo "      --no-txadmin                Disable txAdmin deployment and use cfx-server-data."
-            echo "  -c, --crontab                   Enable or disable crontab autostart."
-            echo "      --kill-port                 Forcefully stop any process running on the TxAdmin port (40120)."
-            echo "      --delete-dir                Forcefully delete the /home/FiveM directory if it exists."
-            echo "  -d, --dir <path>                Specify a custom installation path."
-            echo ""
-            echo "PHPMyAdminInstaller Options:"
-            echo "  -p, --phpmyadmin                Enable or disable phpMyAdmin installation."
-            echo "      --db_user <name>            Specify a database user."
-            echo "      --db_password <password>    Set a custom password for the database."
-            echo "      --generate_password         Automatically generate a secure password for the database."
-            echo "      --reset_password            Reset the database password if one already exists."
-            echo "      --remove_db                 Remove MySQL/MariaDB and reinstall it."
-            echo "      --remove_pma                Remove phpMyAdmin and reinstall it if it already exists."
-            echo ""
-            echo "Existing Database Options:"
-            echo "  --db-host <host>                Specify the host for the existing database."
-            echo "  --db-name <name>                Specify the name for the existing database."
-            echo "  --db-user <user>                Specify the user for the existing database."
-            echo "  --db-password <password>        Set a custom password for the existing database."
-            exit 0
-            ;;
-        --non-interactive)
-            non_interactive=true
-            pma_options+=("--non-interactive")
-            shift
-            ;;
-        -v|--version)
-            artifacts_version="$2"
-            shift 2
-            ;;
-        -u|--update)
-            update_artifacts="$2"
-            shift 2
-            ;;
-        --no-txadmin)
-            txadmin_deployment=false
-            shift
-            ;;
-        -p|--phpmyadmin)
-            install_phpmyadmin=true
-            shift
-            ;;
-        -c|--crontab)
-            crontab_autostart=true
-            shift
-            ;;
-        --kill-port)
-            kill_txAdmin=true
-            shift
-            ;;
-        --delete-dir)
-            delete_dir=true
-            shift
-            ;;
-        -d|--dir)
-            dir="$2"
-            shift 2
-            ;;
-
-        # PHPMyAdmin installer Options:
-        --security)
-            pma_options+=("--security")
-            shift
-            ;;
-        --simple)
-            pma_options+=("--simple")
-            shift
-            ;;
-        --db_user)
-            pma_options+=("--db_user $2")
-            shift 2
-            ;;
-        --db_password)
-            pma_options+=("--db_password $2")
-            shift 2
-            ;;
-        --generate_password)
-            pma_options+=("--generate_password")
-            shift
-            ;;
-        --reset_password)
-            pma_options+=("--reset_password")
-            shift
-            ;;
-        --remove_db)
-            pma_options+=("--remove_db")
-            shift
-            ;;
-        --remove_pma)
-            pma_options+=("--remove_pma")
-            shift
-            ;;
-        # Existing Database Options:
-        --db-host)
-            existing_db_host="$2"
-            existing_db_configured=true
-            shift 2
-            ;;
-        --db-name)
-            existing_db_name="$2"
-            existing_db_configured=true
-            shift 2
-            ;;
-        --db-user)
-            existing_db_user="$2"
-            existing_db_configured=true
-            shift 2
-            ;;
-        --db-password)
-            existing_db_password="$2"
-            existing_db_configured=true
-            shift 2
-            ;;
-        *)
-            echo "Unknown option: $1"
-            exit 1
-            ;;
-    esac
-done
-
-if [[ "${non_interactive}" == "true" && "${install_phpmyadmin}" == "true" ]]; then
-    errors=()
-
-    if ! printf "%s\n" "${pma_options[@]}" | grep -q -- "--security" && 
-       ! printf "%s\n" "${pma_options[@]}" | grep -q -- "--simple"; then
-        errors+=("${red}Error:${reset} With --non-interactive, either --security or --simple must be set.")
-    fi
-
-    if printf "%s\n" "${pma_options[@]}" | grep -q -- "--security"; then
-        if ! printf "%s\n" "${pma_options[@]}" | grep -q -- "--db_user"; then
-            errors+=("${red}Error:${reset} With --non-interactive and --security, --db_user <user> must be set.")
-        fi
-
-        if ! printf "%s\n" "${pma_options[@]}" | grep -q -- "--db_password" && 
-           ! printf "%s\n" "${pma_options[@]}" | grep -q -- "--generate_password"; then
-            errors+=("${red}Error:${reset} With --non-interactive and --security, either --db_password <password> or --generate_password must be set.")
-        fi
-    fi
-
-    if [[ ${#errors[@]} -gt 0 ]]; then
-        for error in "${errors[@]}"; do
-            echo -e "$error"
+            capture_attempts=$((capture_attempts + 1))
+            sleep 5
         done
-        exit 1
+        
+        # Validate and set PIN
+        if [[ "$pin" =~ ^[0-9]{4}$ ]]; then
+            export TXADMIN_PIN="$pin"
+            log "SUCCESS" "PIN extracted successfully: $pin"
+            echo -e "${green}✓ txAdmin started successfully${reset}"
+            echo -e "${yellow}txAdmin PIN: ${bold}$pin${reset}"
+        else
+            log "WARN" "Could not extract valid 4-digit PIN after $max_capture_attempts attempts"
+            export TXADMIN_PIN="check_manually"
+            echo -e "${yellow}⚠ Could not extract PIN automatically${reset}"
+            echo -e "${blue}Use 'screen -r fivem' to view the txAdmin console and get the PIN${reset}"
+        fi
+        
+        # Get the server IP address and TxAdmin URL
+        local server_ip=$(ip route get 1.1.1.1 | awk '{print $7; exit}')
+        local txadmin="http://${server_ip}:40120"
+        echo -e "${blue}Access txAdmin at: $txadmin${reset}"
+        
+        # Clean up temp files
+        rm -f /tmp/fivem_screen_*.txt
+        
+        cd - > /dev/null
+        log "SUCCESS" "txAdmin setup completed"
     fi
-fi
+}
 
-main
+# Function to setup crontab autostart if requested
+setup_crontab_autostart() {
+    local install_dir=$1
+    
+    if [[ "$crontab_autostart" == "1" ]]; then
+        status "Setting up Crontab Autostart"
+        log "INFO" "Configuring crontab for automatic server startup"
+        
+        # Create autostart script
+        cat > "$install_dir/autostart.sh" << EOF
+#!/bin/bash
+# FiveM Server Autostart Script
+cd "$install_dir"
+
+# Determine the appropriate user to run the server
+if [[ "$install_dir" == /home/* ]]; then
+    DIR_USER=\$(echo "$install_dir" | cut -d'/' -f3)
+    if [[ "\$DIR_USER" != "root" ]] && id "\$DIR_USER" &>/dev/null; then
+        su - "\$DIR_USER" -c "cd '$install_dir' && ./run.sh"
+    elif [[ "\$DIR_USER" == "FiveM" ]] && id "fivem" &>/dev/null; then
+        su - fivem -c "cd '$install_dir' && ./run.sh"
+    else
+        ./run.sh
+    fi
+else
+    ./run.sh
+fi
+EOF
+        chmod +x "$install_dir/autostart.sh"
+        
+        # Add to root crontab for system-wide autostart
+        (crontab -l 2>/dev/null; echo "@reboot $install_dir/autostart.sh") | crontab -
+        
+        log "SUCCESS" "Crontab autostart configured"
+        echo -e "${green}✓ Server will automatically start on system boot${reset}"
+    fi
+}
+
+# =============================================================================
+# MAIN INSTALLATION FUNCTION  
+# =============================================================================
+
+# Function to perform the main FiveM server installation
+install_fivem_server() {
+    log "INFO" "Starting FiveM server installation"
+    
+    # Validate installation directory
+    if [[ -z "$dir" ]]; then
+        log "ERROR" "Installation directory not specified"
+        return 1
+    fi
+    
+    # Handle existing directory
+    if [[ -d "$dir" ]]; then
+        if [[ "$delete_dir" == "1" ]]; then
+            log "INFO" "Removing existing directory: $dir"
+            runCommand "rm -rf '$dir'" "Removing existing directory" 0 1
+        elif [[ "$update_artifacts" == "true" ]]; then
+            log "INFO" "Updating existing installation"
+        else
+            log "ERROR" "Directory already exists: $dir"
+            if [[ "${non_interactive}" == "false" ]]; then
+                echo -e "${red}Directory already exists: $dir${reset}"
+                echo -e "${blue}What would you like to do?${reset}\n"
+                
+                export OPTIONS=(
+                    "Remove existing directory and continue"
+                    "Update artifacts only"
+                    "Cancel installation"
+                )
+                
+                bashSelect
+                case $? in
+                    0)
+                        runCommand "rm -rf '$dir'" "Removing existing directory" 0 1
+                        ;;
+                    1)
+                        update_artifacts=true
+                        ;;
+                    2)
+                        log "INFO" "Installation cancelled by user"
+                        return 1
+                        ;;
+                esac
+            else
+                return 1
+            fi
+        fi
+    fi
+    
+    # Create installation directory
+    if [[ ! -d "$dir" ]]; then
+        log "INFO" "Creating installation directory: $dir"
+        runCommand "mkdir -p '$dir'" "Creating installation directory" 0 1
+        
+        # Set proper ownership if installing in user directory
+        if [[ "$dir" == /home/* ]]; then
+            local dir_user=$(echo "$dir" | cut -d'/' -f3)
+            if [[ "$dir_user" != "FiveM" ]] && id "$dir_user" &>/dev/null; then
+                log "INFO" "Setting ownership for user directory: $dir_user"
+                runCommand "chown -R $dir_user:$dir_user '$dir'" "Setting directory ownership" 0 0
+            elif [[ "$dir_user" == "FiveM" ]]; then
+                # Create FiveM user if it doesn't exist
+                if ! id "fivem" &>/dev/null; then
+                    log "INFO" "Creating FiveM system user"
+                    runCommand "useradd -r -m -d /home/FiveM -s /bin/bash fivem" "Creating FiveM user" 0 0
+                fi
+                runCommand "chown -R fivem:fivem '$dir'" "Setting FiveM directory ownership" 0 0
+            fi
+        fi
+    fi
+    
+    # Install server artifacts
+    download_server_artifacts "$dir"
+    
+    # Create configuration files
+    create_server_config "$dir"
+    
+    # Setup database
+    create_fivem_database
+    
+    # Create management scripts
+    create_management_scripts "$dir"
+    
+    # Setup txAdmin if requested
+    setup_txadmin "$dir"
+    
+    # Setup autostart if requested  
+    setup_crontab_autostart "$dir"
+    
+    # Create installation info
+    create_installation_info "$dir"
+    
+    # Start the FiveM server automatically
+    if [[ "${non_interactive}" == "false" ]] && [[ "$txadmin_deployment" != "1" ]]; then
+        echo -e "\n${cyan}Starting FiveM Server automatically...${reset}"
+        log "INFO" "Starting FiveM server"
+        
+        # Start the server
+        "$dir/start.sh" &
+        
+        # Wait a moment for server to start
+        sleep 5
+        
+        # Check if server started successfully
+        if screen -list | grep -q "fivem"; then
+            log "SUCCESS" "FiveM server started successfully in screen session"
+            echo -e "${green}✓ FiveM server started successfully${reset}"
+            echo -e "${blue}Use '$dir/attach.sh' to attach to the server console${reset}"
+        else
+            log "WARN" "FiveM server may not have started properly"
+            echo -e "${yellow}⚠ Server startup status unclear, try '$dir/start.sh' manually${reset}"
+        fi
+    fi
+    
+    log "SUCCESS" "FiveM server installation completed successfully"
+}
+
+# =============================================================================
+# ARGUMENT PARSING AND MAIN EXECUTION
+# =============================================================================
+
+# Function to display help
+show_help() {
+    echo -e "${bold}FiveM Server Installer v${script_version}${reset}"
+    echo -e "${blue}Usage: $0 [OPTIONS]${reset}\n"
+    
+    echo -e "${bold}Installation Options:${reset}"
+    echo -e "${green}  -d, --dir <path>${reset}          Installation directory"
+    echo -e "${green}  --artifacts <version>${reset}     Specific artifacts version (number or 'latest')"
+    echo -e "${green}  --list-artifacts${reset}          List available artifacts versions"
+    echo -e "${green}  --update-artifacts${reset}        Update artifacts in existing installation"
+    echo -e "${green}  --delete-dir${reset}              Delete existing directory before installation"
+    echo -e "\n${bold}Database Options:${reset}"
+    echo -e "${green}  --install-phpmyadmin${reset}      Install MariaDB and phpMyAdmin"
+    echo -e "${green}  --existing-db${reset}             Configure existing database"
+    echo -e "${green}  --db-host <host>${reset}          Database host (for existing db)"
+    echo -e "${green}  --db-name <name>${reset}          Database name (for existing db)"  
+    echo -e "${green}  --db-user <user>${reset}          Database user (for existing db)"
+    echo -e "${green}  --db-password <pass>${reset}      Database password (for existing db)"
+    echo -e "\n${bold}Server Options:${reset}"
+    echo -e "${green}  --txadmin${reset}                 Enable txAdmin deployment"
+    echo -e "${green}  --autostart${reset}               Setup crontab autostart"
+    echo -e "${green}  --kill-txadmin${reset}            Kill existing txAdmin processes"
+    echo -e "\n${bold}General Options:${reset}"
+    echo -e "${green}  --non-interactive${reset}         Run without interactive prompts"
+    echo -e "${green}  -h, --help${reset}                Show this help message"
+    echo -e "${green}  --version${reset}                 Show version information"
+    echo -e "\n${bold}Examples:${reset}"
+    echo -e "${yellow}  $0 -d /home/user/FiveM --install-phpmyadmin${reset}"
+    echo -e "${yellow}  $0 -d /home/FiveM --existing-db --db-host localhost${reset}"
+    echo -e "${yellow}  $0 -d /home/user/FiveM --txadmin --autostart --non-interactive${reset}"
+    echo
+}
+
+# Function to list available artifacts versions
+list_artifacts_versions() {
+    echo -e "${bold}Available FiveM Server Artifacts Versions:${reset}\n"
+    
+    echo -e "${blue}Fetching version information...${reset}"
+    
+    # Get recommended and latest from API
+    local recommended=$(curl -s "https://changelogs-live.fivem.net/api/changelog/versions/linux/server" 2>/dev/null | grep -o '"recommended":"[^"]*' | cut -d'"' -f4)
+    local latest=$(curl -s "https://changelogs-live.fivem.net/api/changelog/versions/linux/server" 2>/dev/null | grep -o '"latest":"[^"]*' | cut -d'"' -f4)
+    
+    # Get recent versions from artifacts page
+    local recent_versions=$(curl -s "https://runtime.fivem.net/artifacts/fivem/build_proot_linux/master/" 2>/dev/null | grep -o 'href="[0-9]*/"' | grep -o '[0-9]*' | sort -nr | head -10)
+    
+    echo -e "${green}${bold}Recommended Versions:${reset}"
+    if [[ -n "$recommended" ]]; then
+        echo -e "${green}  • Recommended: ${bold}$recommended${reset}"
+    fi
+    if [[ -n "$latest" ]]; then
+        echo -e "${green}  • Latest: ${bold}$latest${reset}"
+    fi
+    
+    if [[ -n "$recent_versions" ]]; then
+        echo -e "\n${blue}${bold}Recent Versions (last 10):${reset}"
+        for version in $recent_versions; do
+            if [[ "$version" == "$recommended" ]]; then
+                echo -e "${green}  • $version ${bold}(recommended)${reset}"
+            elif [[ "$version" == "$latest" ]]; then
+                echo -e "${green}  • $version ${bold}(latest)${reset}"
+            else
+                echo -e "  • $version"
+            fi
+        done
+    fi
+    
+    echo -e "\n${yellow}${bold}Usage:${reset}"
+    echo -e "${yellow}  $0 --artifacts latest${reset}        # Use latest version"
+    echo -e "${yellow}  $0 --artifacts $recommended${reset}        # Use specific version"
+    echo -e "${yellow}  $0 -d /home/user/FiveM --artifacts 7290${reset}  # Complete example"
+    echo
+}
+
+# Function to show version
+show_version() {
+    echo -e "${bold}FiveM Server Installer${reset}"
+    echo -e "${blue}Version: ${script_version}${reset}"
+    echo -e "${blue}Author: FiveM Community${reset}"
+    echo -e "${blue}Repository: https://github.com/fivem-server-installer${reset}"
+    echo
+}
+
+# Parse command line arguments
+parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -d|--dir)
+                dir="$2"
+                shift 2
+                ;;
+            --artifacts)
+                artifacts_version="$2"
+                shift 2
+                ;;
+            --list-artifacts)
+                list_artifacts_versions
+                exit 0
+                ;;
+            --update-artifacts)
+                update_artifacts=true
+                shift
+                ;;
+            --delete-dir)
+                delete_dir=1
+                shift
+                ;;
+            --install-phpmyadmin)
+                install_phpmyadmin="true"
+                shift
+                ;;
+            --existing-db)
+                existing_db_configured=true
+                install_phpmyadmin="false"
+                shift
+                ;;
+            --db-host)
+                existing_db_host="$2"
+                shift 2
+                ;;
+            --db-name)
+                existing_db_name="$2"
+                shift 2
+                ;;
+            --db-user)
+                existing_db_user="$2"
+                shift 2
+                ;;
+            --db-password)
+                existing_db_password="$2"
+                shift 2
+                ;;
+            --txadmin)
+                txadmin_deployment=1
+                shift
+                ;;
+            --autostart)
+                crontab_autostart=1
+                shift
+                ;;
+            --kill-txadmin)
+                kill_txAdmin=1
+                shift
+                ;;
+            --non-interactive)
+                non_interactive=true
+                shift
+                ;;
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            --version)
+                show_version
+                exit 0
+                ;;
+            *)
+                echo -e "${red}Unknown option: $1${reset}"
+                echo -e "Use --help for usage information"
+                exit 1
+                ;;
+        esac
+    done
+}
+
+# Interactive setup for missing parameters
+interactive_setup() {
+    if [[ "${non_interactive}" == "true" ]]; then
+        return 0
+    fi
+    
+    # Welcome message
+    clear
+    echo -e "\n${cyan}╔══════════════════════════════════════════════════════════════════════════════╗${reset}"
+    echo -e "${cyan}║ ${bold}${green}                        FIVEM SERVER INSTALLER                         ${reset}${cyan}║${reset}"
+    echo -e "${cyan}║ ${reset}${blue}                            Version: $script_version                            ${reset}${cyan}║${reset}"
+    echo -e "${cyan}╚══════════════════════════════════════════════════════════════════════════════╝${reset}\n"
+    
+    echo -e "${green}Welcome to the FiveM Server Installer!${reset}"
+    echo -e "${blue}This script will help you install and configure a FiveM server.${reset}\n"
+    
+    # Get installation directory if not specified
+    if [[ -z "$dir" ]]; then
+        # Determine default directory
+        get_default_install_dir
+        echo -e "${cyan}Installation Directory:${reset}"
+        read -p "Enter installation directory (default: $default_dir): " dir
+        dir=${dir:-$default_dir}
+        log "INFO" "Installation directory set to: $dir"
+    fi
+    
+    # Ask about txAdmin
+    if [[ "$txadmin_deployment" == "0" ]]; then
+        echo -e "\n${cyan}txAdmin Configuration:${reset}"
+        echo -e "${blue}txAdmin provides a web-based management interface for your server.${reset}"
+        
+        export OPTIONS=(
+            "Enable txAdmin (Recommended)"
+            "Skip txAdmin setup"
+        )
+        
+        bashSelect
+        case $? in
+            0)
+                txadmin_deployment=1
+                log "INFO" "txAdmin enabled"
+                ;;
+            1)
+                log "INFO" "txAdmin disabled"
+                ;;
+        esac
+    fi
+    
+    # Ask about autostart
+    if [[ "$crontab_autostart" == "0" ]]; then
+        echo -e "\n${cyan}Autostart Configuration:${reset}"
+        echo -e "${blue}Setup automatic server startup on system boot?${reset}"
+        
+        export OPTIONS=(
+            "Enable autostart"
+            "Skip autostart setup"
+        )
+        
+        bashSelect
+        case $? in
+            0)
+                crontab_autostart=1
+                log "INFO" "Autostart enabled"
+                ;;
+            1)
+                log "INFO" "Autostart disabled"
+                ;;
+        esac
+    fi
+}
+
+# Kill existing txAdmin processes if requested
+kill_txadmin_processes() {
+    if [[ "$kill_txAdmin" == "1" ]]; then
+        log "INFO" "Killing existing txAdmin processes"
+        pkill -f "txAdmin" 2>/dev/null || true
+        pkill -f "fxserver" 2>/dev/null || true
+        log "SUCCESS" "Existing processes killed"
+    fi
+}
+
+# Main execution function
+main() {
+    # Parse command line arguments
+    parse_arguments "$@"
+    
+    # Gather system information
+    gather_system_info
+    
+    # Kill txAdmin processes if requested
+    kill_txadmin_processes
+    
+    # Interactive setup for missing parameters
+    interactive_setup
+    
+    # Choose artifacts version
+    choose_artifacts_version
+    
+    # Install database if requested
+    installPma
+    
+    # Install FiveM server
+    install_fivem_server
+    
+    # Final summary with detailed information
+    clear
+    local server_ip=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}' || echo "Unknown")
+    
+    echo -e "\n${cyan}╔══════════════════════════════════════════════════════════════════════════════╗${reset}"
+    echo -e "${cyan}║ ${bold}${green}                    INSTALLATION COMPLETED SUCCESSFULLY                  ${reset}${cyan}║${reset}"
+    echo -e "${cyan}║ ${reset}${blue}                        FiveM Server Installer v${script_version}                        ${reset}${cyan}║${reset}"
+    echo -e "${cyan}╚══════════════════════════════════════════════════════════════════════════════╝${reset}\n"
+
+    echo -e "${bold}${yellow}CONNECTION INFORMATION${reset}"
+    echo -e "${blue}Please save these important connection details:${reset}\n"
+    
+    echo -e "${bold}${green}▶ FIVEM SERVER${reset}"
+    echo -e "${blue}  • Server IP :${reset} ${bold}$server_ip${reset}"
+    echo -e "${blue}  • Server Port :${reset} ${bold}30120${reset}"
+    echo -e "${blue}  • Connection String :${reset} ${bold}connect $server_ip:30120${reset}"
+    echo -e "${blue}  • Installation Directory :${reset} ${bold}$dir${reset}"
+    
+    if [[ "$txadmin_deployment" == "1" ]]; then
+        echo -e "\n${bold}${green}▶ TXADMIN${reset}"
+        echo -e "${blue}  • Access URL :${reset} ${bold}http://$server_ip:40120${reset}"
+        echo -e "${blue}  • Port :${reset} ${bold}40120${reset}"
+        
+        case "$TXADMIN_PIN" in
+            "not_available")
+                echo -e "${blue}  • Status :${reset} ${red}Failed - FiveM executable not found${reset}"
+                echo -e "${blue}  • Note :${reset} ${yellow}Check if FiveM artifacts were downloaded correctly${reset}"
+                ;;
+            "session_failed")
+                echo -e "${blue}  • Status :${reset} ${red}Failed - Could not start screen session${reset}"
+                echo -e "${blue}  • Note :${reset} ${yellow}Try starting manually: cd $dir && screen -dmS fivem ./fx txAdmin${reset}"
+                ;;
+            "check_manually")
+                echo -e "${blue}  • PIN Code :${reset} ${yellow}Check manually with: screen -r fivem${reset}"
+                echo -e "${blue}  • Status :${reset} ${bold}${green}Running${reset}"
+                ;;
+            "unknown"|"")
+                echo -e "${blue}  • PIN Code :${reset} ${yellow}Not captured${reset}"
+                echo -e "${blue}  • Note :${reset} ${yellow}First access will require setup${reset}"
+                ;;
+            *)
+                if [[ "$TXADMIN_PIN" =~ ^[0-9]{4}$ ]]; then
+                    echo -e "${blue}  • PIN Code :${reset} ${bold}${yellow}$TXADMIN_PIN${reset}"
+                    echo -e "${blue}  • Status :${reset} ${bold}${green}Running${reset}"
+                else
+                    echo -e "${blue}  • PIN Code :${reset} ${yellow}$TXADMIN_PIN${reset}"
+                    echo -e "${blue}  • Status :${reset} ${yellow}Check manually${reset}"
+                fi
+                ;;
+        esac
+    fi
+
+    # Database information based on configuration
+    if [[ "$existing_db_configured" == "true" ]]; then
+        echo -e "\n${bold}${green}▶ DATABASE (EXISTING)${reset}"
+        echo -e "${blue}  • Host/IP :${reset} ${bold}$existing_db_host${reset}"
+        echo -e "${blue}  • Database :${reset} ${bold}$existing_db_name${reset}"
+        echo -e "${blue}  • User :${reset} ${bold}$existing_db_user${reset}"
+        echo -e "${blue}  • Password :${reset} ${bold}[Hidden for security]${reset}"
+        echo -e "${blue}  • Connection String :${reset} ${bold}server=$existing_db_host;uid=$existing_db_user;password=***;database=$existing_db_name;port=3306;${reset}"
+    elif [[ "$install_phpmyadmin" == "true" ]] && [[ -n "$rootPasswordMariaDB" ]]; then
+        echo -e "\n${bold}${green}▶ MARIADB/MYSQL${reset}"
+        echo -e "${blue}  • Host/IP :${reset} ${bold}localhost${reset}"
+        echo -e "${blue}  • Port :${reset} ${bold}3306${reset}"
+        echo -e "${blue}  • Database :${reset} ${bold}fivem${reset}"
+        echo -e "${blue}  • User :${reset} ${bold}root${reset}"
+        echo -e "${blue}  • Password :${reset} ${bold}$rootPasswordMariaDB${reset}"
+        echo -e "${blue}  • Remote Access :${reset} ${bold}Enabled${reset}"
+
+        echo -e "\n${bold}${green}▶ PHPMYADMIN${reset}"
+        echo -e "${blue}  • Access URL :${reset} ${bold}http://$server_ip/phpmyadmin/${reset}"
+        echo -e "${blue}  • User :${reset} ${bold}root${reset}"
+        echo -e "${blue}  • Password :${reset} ${bold}$rootPasswordMariaDB${reset}"
+        
+        echo -e "\n${bold}${green}▶ DATABASE CONNECTION STRING${reset}"
+        echo -e "${blue}  For server.cfg :${reset}"
+        echo -e "${bold}  set mysql_connection_string \"server=localhost;uid=root;password=$rootPasswordMariaDB;database=fivem;port=3306;\"${reset}"
+    else
+        echo -e "\n${bold}${green}▶ DATABASE${reset}"
+        echo -e "${blue}  • Status :${reset} ${yellow}Not configured${reset}"
+        echo -e "${blue}  • Note :${reset} ${yellow}You can configure database manually later if needed${reset}"
+    fi
+
+    echo -e "\n${bold}${yellow}SYSTEM INFORMATION${reset}"
+    echo -e "${blue}  • Server IP :${reset} ${bold}$server_ip${reset}"
+    echo -e "${blue}  • Installation Date :${reset} ${bold}$(date)${reset}"
+    echo -e "${blue}  • Log File :${reset} ${bold}$LOG_FILE${reset}"
+    echo -e "${blue}  • Installation Info :${reset} ${bold}$dir/installation_info.txt${reset}"
+    
+    if [[ "$crontab_autostart" == "1" ]]; then
+        echo -e "${blue}  • Autostart :${reset} ${bold}Enabled (will start on boot)${reset}"
+    else
+        echo -e "${blue}  • Autostart :${reset} ${yellow}Disabled${reset}"
+    fi
+    
+    # Check if server is running
+    local server_running=false
+    local server_info=""
+    
+    # Check for screen session first (txAdmin)
+    if screen -list | grep -q "fivem"; then
+        server_running=true
+        server_info="Running in screen session 'fivem'"
+    # Check for background process
+    elif pgrep -f "fx.*server" > /dev/null; then
+        server_running=true
+        local server_pid=$(pgrep -f "fx.*server" | head -1)
+        server_info="Running (PID: $server_pid)"
+    fi
+    
+    if [ "$server_running" = true ]; then
+        echo -e "${blue}  • Server Status :${reset} ${bold}${green}Running${reset}"
+        echo -e "${blue}  • Server Info :${reset} ${bold}$server_info${reset}"
+    else
+        echo -e "${blue}  • Server Status :${reset} ${yellow}Stopped${reset}"
+    fi
+
+    echo -e "\n${bold}${cyan}SERVER MANAGEMENT COMMANDS${reset}"
+    
+    # Check server status for appropriate commands
+    if screen -list | grep -q "fivem"; then
+        echo -e "${blue}• Attach to server console: ${bold}screen -r fivem${reset}"
+        echo -e "${blue}• Stop server: ${bold}$dir/stop.sh${reset}"
+        echo -e "${blue}• Restart server: ${bold}screen -S fivem -X quit && $dir/start.sh${reset}"
+    elif pgrep -f "fx.*server" > /dev/null; then
+        echo -e "${blue}• Stop server: ${bold}$dir/stop.sh${reset}"
+        echo -e "${blue}• Restart server: ${bold}$dir/stop.sh && $dir/start.sh${reset}"
+        echo -e "${blue}• View server logs: ${bold}tail -f $dir/server.log${reset}"
+    else
+        echo -e "${blue}• Start server: ${bold}$dir/start.sh${reset}"
+    fi
+    
+    echo -e "${blue}• Edit configuration: ${bold}nano $dir/server.cfg${reset}"
+    echo -e "${blue}• View installation logs: ${bold}tail -f $LOG_FILE${reset}"
+
+    echo -e "\n${bold}${cyan}NEXT STEPS${reset}"
+    echo -e "${blue}1. ${bold}REQUIRED:${reset} Get your license key from ${bold}https://keymaster.fivem.net/${reset}"
+    echo -e "${blue}2. Edit your server configuration: ${bold}nano $dir/server.cfg${reset}"
+    echo -e "${blue}3. Add your license key to server.cfg"
+    echo -e "${blue}4. Configure server settings (hostname, description, etc.)"
+    echo -e "${blue}5. Add admin permissions in permissions.cfg"
+    if ! screen -list | grep -q "fivem" && ! pgrep -f "fx.*server" > /dev/null; then
+        echo -e "${blue}6. Start your server: ${bold}cd $dir && ./run.sh${reset}"
+    fi
+
+    echo -e "\n${bold}${cyan}IMPORTANT NOTES${reset}"
+    echo -e "${blue}• Make sure to open port 30120 (TCP/UDP) in your firewall"
+    if [[ "$txadmin_deployment" == "1" ]]; then
+        echo -e "${blue}• Make sure to open port 40120 (TCP) for txAdmin access"
+    fi
+    echo -e "${blue}• Save all passwords and connection information in a secure location"
+    echo -e "${blue}• Check the installation info file for complete details"
+
+    echo -e "\n${bold}${cyan}SUPPORT & DOCUMENTATION${reset}"
+    echo -e "${blue}• FiveM Documentation: ${bold}https://docs.fivem.net/${reset}"
+    echo -e "${blue}• FiveM Forum: ${bold}https://forum.cfx.re/${reset}"
+    echo -e "${blue}• FiveM Discord: ${bold}https://discord.gg/fivem${reset}"
+
+    echo -e "\n${green}${bold}✓ FiveM Server installation completed successfully!${reset}"
+    echo -e "${yellow}Thank you for using the FiveM Server Installer${reset}\n"
+    
+    cleanup_and_exit 0 "${green}Installation completed successfully!${reset}"
+}
+
+# Execute main function with all arguments
+main "$@" 
